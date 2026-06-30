@@ -11,8 +11,8 @@ export default function FieldList({ fields, fieldCount, loading }) {
         <div className="field-list-header">
           <h3>Detected Fields</h3>
         </div>
-        <div className="field-list-loading">
-          <div className="spinner" />
+        <div className="field-list-loading" role="status" aria-live="polite">
+          <div className="spinner" aria-hidden="true" />
           <p>Detecting fields…</p>
         </div>
       </div>
@@ -49,7 +49,7 @@ export default function FieldList({ fields, fieldCount, loading }) {
     <div className="field-list">
       <div className="field-list-header">
         <h3>Detected Fields</h3>
-        <span className="field-count">{fieldCount}</span>
+        <span className="field-count" aria-label={`${fieldCount} fields detected`}>{fieldCount}</span>
       </div>
 
       <div className="field-summary">
@@ -57,7 +57,7 @@ export default function FieldList({ fields, fieldCount, loading }) {
           const info = TYPE_ICONS[type] || TYPE_ICONS.text
           return (
             <div key={type} className="summary-chip" style={{ borderColor: info.color }}>
-              <span className="chip-icon" style={{ color: info.color }}>{info.icon}</span>
+              <span className="chip-icon" style={{ color: info.color }} aria-hidden="true">{info.icon}</span>
               <span className="chip-count">{items.length}</span>
               <span className="chip-label">{info.label}</span>
             </div>
@@ -65,12 +65,12 @@ export default function FieldList({ fields, fieldCount, loading }) {
         })}
       </div>
 
-      <div className="field-items">
+      <div className="field-items" role="list" aria-label="List of detected form fields">
         {fields.map((field, idx) => {
           const info = TYPE_ICONS[field.type] || TYPE_ICONS.text
           return (
-            <div key={idx} className="field-item">
-              <div className="field-item-icon" style={{ color: info.color }}>
+            <div key={idx} className="field-item" role="listitem">
+              <div className="field-item-icon" style={{ color: info.color }} aria-hidden="true">
                 {info.icon}
               </div>
               <div className="field-item-content">

@@ -18,6 +18,7 @@ export default function PdfViewer({ pdfData, fields, pageSizes, loading }) {
   const [pdfDoc, setPdfDoc] = useState(null)
   const [currentPage, setCurrentPage] = useState(1)
   const [renderedPages, setRenderedPages] = useState({})
+  const [pdfError, setPdfError] = useState(null)
   const canvasRefs = useRef({})
 
   // Load PDF document
@@ -25,6 +26,7 @@ export default function PdfViewer({ pdfData, fields, pageSizes, loading }) {
     if (!pdfData) return
     setPdfDoc(null)
     setRenderedPages({})
+    setPdfError(null)
 
     const loadingTask = pdfjsLib.getDocument({ data: pdfData.slice(0) })
     loadingTask.promise.then((doc) => {
@@ -32,10 +34,21 @@ export default function PdfViewer({ pdfData, fields, pageSizes, loading }) {
       setCurrentPage(1)
     }).catch((err) => {
       console.error('PDF load error:', err)
+      setPdfError('Failed to load PDF preview. The file may be corrupted or unsupported.')
     })
 
     return () => {
-      setPdfDoc(null)
+      // Clean up the PDF document to free memory
+      setPdfDoc((prevDoc) => {
+        if (prevDoc) {
+          try {
+            prevDoc.destroy()
+          } catch {
+            // ignore cleanup errors
+          }
+        }
+        return null
+      })
       setRenderedPages({})
     }
   }, [pdfData])
@@ -67,7 +80,9 @@ export default function PdfViewer({ pdfData, fields, pageSizes, loading }) {
       setRenderedPages((prev) => ({ ...prev, [pageNum]: { width: viewport.width, height: viewport.height } }))
     }
 
-    renderPage(currentPage).catch(console.error)
+    renderPage(currentPage).catch((err) => {
+      console.error('Page render error:', err)
+    })
   }, [pdfDoc, currentPage])
 
   // Also render adjacent pages for smooth scrolling
@@ -92,7 +107,9 @@ export default function PdfViewer({ pdfData, fields, pageSizes, loading }) {
           }).promise
           setRenderedPages((prev) => ({ ...prev, [p]: { width: viewport.width, height: viewport.height } }))
         }
-        renderPage().catch(console.error)
+        renderPage().catch((err) => {
+          console.error('Adjacent page render error:', err)
+        })
       }
     })
   }, [pdfDoc, currentPage, renderedPages])
@@ -108,32 +125,54 @@ export default function PdfViewer({ pdfData, fields, pageSizes, loading }) {
 
   const pageFields = (fields || []).filter((f) => f.page === currentPage - 1)
 
+  const goToPrevPage = () => setCurrentPage((p) => Math.max(1, p - 1))
+  const goToNextPage = () => setCurrentPage((p) => Math.min(numPages, p + 1))
+
+  // Keyboard navigation for the PDF viewer
+  const handleKeyDown = (e) => {
+    if (e.key === 'ArrowLeft') {
+      e.preventDefault()
+      goToPrevPage()
+    } else if (e.key === 'ArrowRight') {
+      e.preventDefault()
+      goToNextPage()
+    }
+  }
+
   return (
-    <div className="pdf-viewer">
+    <div className="pdf-viewer" onKeyDown={handleKeyDown} tabIndex={0} aria-label="PDF preview — use arrow keys to navigate pages">
       {loading && (
-        <div className="pdf-loading">
-          <div className="spinner" />
+        <div className="pdf-loading" role="status" aria-live="polite">
+          <div className="spinner" aria-hidden="true" />
           <p>Analyzing PDF…</p>
+        </div>
+      )}
+
+      {pdfError && (
+        <div className="pdf-placeholder" role="alert" aria-live="assertive">
+          <p>{pdfError}</p>
         </div>
       )}
 
       {pdfDoc && (
         <>
-          <div className="pdf-controls">
+          <div className="pdf-controls" role="navigation" aria-label="Page navigation">
             <button
               className="page-btn"
-              onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+              onClick={goToPrevPage}
               disabled={currentPage <= 1}
+              aria-label="Previous page"
             >
               ← Prev
             </button>
-            <span className="page-indicator">
+            <span className="page-indicator" aria-current="page">
               Page {currentPage} / {numPages}
             </span>
             <button
               className="page-btn"
-              onClick={() => setCurrentPage((p) => Math.min(numPages, p + 1))}
+              onClick={goToNextPage}
               disabled={currentPage >= numPages}
+              aria-label="Next page"
             >
               Next →
             </button>
@@ -147,6 +186,8 @@ export default function PdfViewer({ pdfData, fields, pageSizes, loading }) {
               >
                 <canvas
                   ref={(el) => { if (el) canvasRefs.current[pageNum] = el }}
+                  role="img"
+                  aria-label={`Page ${pageNum} of ${numPages}`}
                 />
                 {pageNum === currentPage && pageFields.length > 0 && renderedPages[pageNum] && (
                   <div className="field-overlay" style={{ width: canvasRefs.current[pageNum]?.style.width, height: canvasRefs.current[pageNum]?.style.height }}>
@@ -171,8 +212,10 @@ export default function PdfViewer({ pdfData, fields, pageSizes, loading }) {
                             backgroundColor: color.fill,
                           }}
                           title={field.label || field.name}
+                          role="img"
+                          aria-label={`${color.label} field: ${field.label || field.name || `Field ${idx + 1}`}`}
                         >
-                          <span className="field-type-badge" style={{ backgroundColor: color.stroke }}>
+                          <span className="field-type-badge" style={{ backgroundColor: color.stroke }} aria-hidden="true">
                             {field.type === 'checkbox' ? '☑' : field.type === 'table_cell' ? '▦' : 'T'}
                           </span>
                           {field.label && (
@@ -189,7 +232,7 @@ export default function PdfViewer({ pdfData, fields, pageSizes, loading }) {
         </>
       )}
 
-      {!pdfDoc && !loading && (
+      {!pdfDoc && !loading && !pdfError && (
         <div className="pdf-placeholder">
           <p>Upload a PDF to see preview</p>
         </div>

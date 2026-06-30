@@ -3,6 +3,7 @@ import { useState, useCallback, useRef } from 'react'
 export default function UploadZone({ onFile, error }) {
   const [dragging, setDragging] = useState(false)
   const inputRef = useRef(null)
+  const zoneRef = useRef(null)
 
   const handleDragOver = useCallback((e) => {
     e.preventDefault()
@@ -38,9 +39,22 @@ export default function UploadZone({ onFile, error }) {
     e.target.value = ''
   }, [onFile])
 
+  /**
+   * Keyboard handler for the upload zone (acts as a button).
+   * Supports Enter and Space to open the file dialog — matching
+   * native button behaviour for accessibility.
+   */
+  const handleKeyDown = useCallback((e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault()
+      inputRef.current?.click()
+    }
+  }, [])
+
   return (
     <div className="upload-container">
       <div
+        ref={zoneRef}
         className={`upload-zone ${dragging ? 'dragging' : ''}`}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
@@ -48,7 +62,9 @@ export default function UploadZone({ onFile, error }) {
         onClick={handleClick}
         role="button"
         tabIndex={0}
-        onKeyDown={(e) => e.key === 'Enter' && handleClick()}
+        aria-label="Upload a PDF file — drop a file here or press Enter to browse"
+        aria-describedby="upload-hint"
+        onKeyDown={handleKeyDown}
       >
         <input
           ref={inputRef}
@@ -56,8 +72,10 @@ export default function UploadZone({ onFile, error }) {
           accept="application/pdf,.pdf"
           onChange={handleChange}
           style={{ display: 'none' }}
+          aria-label="Select a PDF file to upload"
+          aria-hidden="true"
         />
-        <div className="upload-icon">
+        <div className="upload-icon" aria-hidden="true">
           <svg width="80" height="80" viewBox="0 0 80 80" fill="none">
             <rect x="16" y="8" width="48" height="64" rx="6" fill="none" stroke="#00d4ff" stroke-width="3"/>
             <line x1="26" y1="24" x2="54" y2="24" stroke="#00d4ff" stroke-width="3" stroke-linecap="round"/>
@@ -69,26 +87,26 @@ export default function UploadZone({ onFile, error }) {
         </div>
         <h2 className="upload-title">Drop your PDF here</h2>
         <p className="upload-subtitle">or click to browse</p>
-        <p className="upload-hint">Max 50 MB · PDF files only</p>
+        <p id="upload-hint" className="upload-hint">Max 50 MB · PDF files only</p>
       </div>
 
       {error && (
-        <div className="upload-error">
-          <span>⚠</span> {error}
+        <div className="upload-error" role="alert" aria-live="assertive">
+          <span aria-hidden="true">⚠</span> {error}
         </div>
       )}
 
       <div className="upload-features">
         <div className="feature">
-          <span className="feature-icon">🔍</span>
+          <span className="feature-icon" aria-hidden="true">🔍</span>
           <span className="feature-text">Auto-detect form fields</span>
         </div>
         <div className="feature">
-          <span className="feature-icon">⬇</span>
+          <span className="feature-icon" aria-hidden="true">⬇</span>
           <span className="feature-text">Download fillable PDF</span>
         </div>
         <div className="feature">
-          <span className="feature-icon">🔒</span>
+          <span className="feature-icon" aria-hidden="true">🔒</span>
           <span className="feature-text">Files processed & deleted</span>
         </div>
       </div>

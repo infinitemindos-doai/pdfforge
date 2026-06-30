@@ -7,6 +7,12 @@ import { analyzePdf, generatePdf } from './api.js'
 
 const API_BASE = import.meta.env.VITE_API_URL || ''
 
+// Maximum upload size: 50 MB — must match the backend limit
+const MAX_FILE_SIZE = 50 * 1024 * 1024
+
+// PDF magic bytes — every valid PDF starts with %PDF
+const PDF_MAGIC = '%PDF'
+
 export default function App() {
   // ── State ──
   const [pdfFile, setPdfFile] = useState(null)        // File object
@@ -19,25 +25,80 @@ export default function App() {
   const [generating, setGenerating] = useState(false)  // generating fillable
   const [error, setError] = useState(null)
   const [view, setView] = useState('upload')           // 'upload' | 'results'
+  const errorBannerRef = useRef(null)
+
+  // Move focus to the error banner when it appears (accessibility)
+  useEffect(() => {
+    if (error && errorBannerRef.current) {
+      errorBannerRef.current.focus()
+    }
+  }, [error])
+
+  /**
+   * Validate a File object client-side before upload.
+   * Checks:
+   *   1. MIME type is application/pdf
+   *   2. Extension is .pdf
+   *   3. File size ≤ 50 MB
+   *   4. File content starts with %PDF magic bytes
+   *
+   * @param {File} file - The file to validate
+   * @returns {Promise<boolean>} - true if valid, false otherwise
+   */
+  const validateFile = useCallback(async (file) => {
+    // Check MIME type (can be spoofed by the browser, but catches obvious mistakes)
+    if (file.type !== 'application/pdf') {
+      setError('Please upload a PDF file. Only PDF files are accepted.')
+      return false
+    }
+
+    // Check extension
+    if (!file.name.toLowerCase().endsWith('.pdf')) {
+      setError('The file must have a .pdf extension.')
+      return false
+    }
+
+    // Check file size
+    if (file.size > MAX_FILE_SIZE) {
+      setError('File too large. Maximum size is 50 MB.')
+      return false
+    }
+
+    // Check PDF magic bytes — read the first 5 bytes of the file
+    try {
+      const header = file.slice(0, 5)
+      const headerText = await header.text()
+      if (!headerText.startsWith(PDF_MAGIC)) {
+        setError('This file does not appear to be a valid PDF (missing PDF header).')
+        return false
+      }
+    } catch {
+      // If we can't read the header, let the server validate
+      // (don't block the user — the backend will catch it)
+    }
+
+    return true
+  }, [])
 
   // ── Handle file selection ──
   const handleFile = useCallback(async (file) => {
     if (!file) return
-    if (file.type !== 'application/pdf') {
-      setError('Please upload a PDF file.')
-      return
-    }
-    if (file.size > 50 * 1024 * 1024) {
-      setError('File too large. Maximum size is 50 MB.')
-      return
-    }
+
+    // Validate before proceeding
+    const isValid = await validateFile(file)
+    if (!isValid) return
 
     setError(null)
     setPdfFile(file)
 
     // Read file into ArrayBuffer for PDF.js rendering
-    const arrayBuffer = await file.arrayBuffer()
-    setPdfData(arrayBuffer)
+    try {
+      const arrayBuffer = await file.arrayBuffer()
+      setPdfData(arrayBuffer)
+    } catch {
+      setError('Failed to read the selected file. Please try again.')
+      return
+    }
 
     // Auto-analyze
     setLoading(true)
@@ -54,7 +115,7 @@ export default function App() {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [validateFile])
 
   // ── Download fillable PDF ──
   const handleDownload = useCallback(async () => {
@@ -92,12 +153,17 @@ export default function App() {
     setView('upload')
   }, [])
 
+  // ── Dismiss error ──
+  const handleDismissError = useCallback(() => {
+    setError(null)
+  }, [])
+
   // ── Render ──
   return (
     <div className="app">
       <Header />
 
-      <main className="main-content">
+      <main className="main-content" role="main">
         {view === 'upload' && (
           <UploadZone onFile={handleFile} error={error} />
         )}
@@ -105,17 +171,29 @@ export default function App() {
         {view === 'results' && (
           <div className="results-layout">
             {error && (
-              <div className="error-banner">
-                <span className="error-icon">⚠</span>
+              <div
+                className="error-banner"
+                role="alert"
+                aria-live="assertive"
+                tabIndex={-1}
+                ref={errorBannerRef}
+              >
+                <span className="error-icon" aria-hidden="true">⚠</span>
                 {error}
-                <button className="error-dismiss" onClick={() => setError(null)}>×</button>
+                <button
+                  className="error-dismiss"
+                  onClick={handleDismissError}
+                  aria-label="Dismiss error message"
+                >
+                  ×
+                </button>
               </div>
             )}
 
             <div className="results-main">
-              <div className="toolbar">
+              <div className="toolbar" role="toolbar" aria-label="PDF tools">
                 <div className="file-info">
-                  <span className="file-icon">📄</span>
+                  <span className="file-icon" aria-hidden="true">📄</span>
                   <span className="file-name">{pdfFile?.name}</span>
                   {pdfFile && (
                     <span className="file-size">
@@ -128,6 +206,7 @@ export default function App() {
                     className="btn btn-secondary"
                     onClick={handleReset}
                     disabled={loading || generating}
+                    aria-label="Start over with a new PDF"
                   >
                     ← New PDF
                   </button>
@@ -135,9 +214,10 @@ export default function App() {
                     className="btn btn-primary"
                     onClick={handleDownload}
                     disabled={loading || generating || !fields?.length}
+                    aria-label="Download the fillable PDF"
                   >
                     {generating ? (
-                      <><span className="spinner" /> Generating…</>
+                      <><span className="spinner" aria-hidden="true" /> Generating…</>
                     ) : (
                       <>⬇ Download Fillable PDF</>
                     )}
@@ -153,7 +233,7 @@ export default function App() {
               />
             </div>
 
-            <aside className="sidebar">
+            <aside className="sidebar" aria-label="Detected fields sidebar">
               <FieldList
                 fields={fields}
                 fieldCount={fieldCount}
@@ -164,9 +244,14 @@ export default function App() {
         )}
       </main>
 
-      <footer className="footer">
+      <footer className="footer" role="contentinfo">
         <span>pdfforge — Open-source PDF form field generator</span>
-        <a href="https://github.com/infinitemindos-doai/pdfforge" target="_blank" rel="noopener">
+        <a
+          href="https://github.com/infinitemindos-doai/pdfforge"
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label="View pdfforge on GitHub (opens in a new tab)"
+        >
           GitHub →
         </a>
       </footer>
