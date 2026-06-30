@@ -4,6 +4,7 @@ pdfforge/api/app.py — FastAPI backend for pdfforge web app.
 Endpoints:
   GET  /api/health       — health check
   GET  /api/samples      — list available sample PDFs
+  GET  /api/samples?download=<name> — download a specific sample PDF
   POST /api/analyze-pdf  — upload PDF, get detected field schema (JSON)
   POST /api/generate-pdf — upload PDF + optional fields, get fillable PDF download
 """
@@ -11,16 +12,19 @@ Endpoints:
 from __future__ import annotations
 
 import os
+import re
 import sys
 import tempfile
 import shutil
 import json
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
+import fitz  # PyMuPDF
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
+from fastapi.background import BackgroundTasks
 import uvicorn
 
 # ── Import detector & generator from parent directory ──────────────────
@@ -33,6 +37,7 @@ from generator import generate_fillable_pdf, verify_acroform_fields
 # ── Config ──────────────────────────────────────────────────────────────
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
 ALLOWED_EXTENSIONS = {".pdf"}
+PDF_MAGIC = b"%PDF"  # All valid PDF files start with these bytes
 
 # CORS: allow GitHub Pages + localhost dev
 ALLOWED_ORIGINS = [
@@ -52,7 +57,7 @@ SAMPLES_DIR = PARENT_DIR
 app = FastAPI(
     title="pdfforge API",
     description="Detect form fields in flat PDFs and generate fillable PDFs.",
-    version="1.0.0",
+    version="1.1.0",
 )
 
 app.add_middleware(
@@ -66,8 +71,14 @@ app.add_middleware(
 
 # ── Helpers ─────────────────────────────────────────────────────────────
 
-def _validate_pdf(filename: str, file_size: int) -> None:
-    """Validate uploaded file is a PDF and within size limit."""
+def _validate_pdf(filename: str, file_size: int, content: bytes | None = None) -> None:
+    """Validate uploaded file is a PDF and within size limit.
+
+    Checks:
+    1. File extension is .pdf
+    2. File size is within MAX_UPLOAD_BYTES
+    3. File content starts with PDF magic bytes (%PDF) if content is provided
+    """
     ext = Path(filename).suffix.lower()
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(
@@ -79,14 +90,73 @@ def _validate_pdf(filename: str, file_size: int) -> None:
             status_code=413,
             detail=f"File too large. Maximum size is {MAX_UPLOAD_BYTES // (1024*1024)} MB.",
         )
+    if content is not None and not content.startswith(PDF_MAGIC):
+        raise HTTPException(
+            status_code=400,
+            detail="File does not appear to be a valid PDF (missing PDF header).",
+        )
 
 
-def _save_upload(upload: UploadFile, dest_dir: str) -> str:
-    """Save an UploadFile to a temp dir and return the path."""
-    dest_path = os.path.join(dest_dir, upload.filename or "input.pdf")
-    with open(dest_path, "wb") as f:
-        shutil.copyfileobj(upload.file, f)
-    return dest_path
+def _safe_filename(filename: str) -> str:
+    """Sanitize a filename to prevent path traversal attacks.
+
+    Strips directory components and replaces potentially dangerous
+    characters. Ensures the result is a simple basename with a .pdf
+    extension.
+    """
+    # Take only the basename — strips any directory traversal (../, /, \)
+    basename = os.path.basename(filename or "input.pdf")
+    # Replace any remaining non-alphanumeric characters (except . - _) with _
+    basename = re.sub(r'[^\w.\-]', '_', basename)
+    # Ensure it has a .pdf extension
+    if not basename.lower().endswith('.pdf'):
+        basename = (basename or "input") + '.pdf'
+    if not basename or basename == '.pdf':
+        basename = 'input.pdf'
+    return basename
+
+
+def _validate_fields(fields: list) -> None:
+    """Validate that a list of field dicts has the required structure.
+
+    Required keys: page, type, x, y, width, height
+    Valid types: text, checkbox, table_cell
+    """
+    if not isinstance(fields, list):
+        raise HTTPException(
+            status_code=400,
+            detail="fields_json must be a JSON array of field objects.",
+        )
+    required_keys = {"page", "type", "x", "y", "width", "height"}
+    valid_types = {"text", "checkbox", "table_cell"}
+    for i, f in enumerate(fields):
+        if not isinstance(f, dict):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Field at index {i} is not a JSON object.",
+            )
+        missing = required_keys - set(f.keys())
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Field at index {i} is missing required keys: {sorted(missing)}",
+            )
+        if f["type"] not in valid_types:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Field at index {i} has invalid type '{f['type']}'. "
+                    f"Valid types: {sorted(valid_types)}"
+                ),
+            )
+        if not isinstance(f["page"], int) or f["page"] < 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Field at index {i} has invalid page number '{f['page']}'. "
+                    f"Must be a non-negative integer."
+                ),
+            )
 
 
 # ── Endpoints ───────────────────────────────────────────────────────────
@@ -94,12 +164,49 @@ def _save_upload(upload: UploadFile, dest_dir: str) -> str:
 @app.get("/api/health")
 async def health():
     """Health check endpoint."""
-    return {"status": "healthy", "service": "pdfforge-api", "version": "1.0.0"}
+    return {"status": "healthy", "service": "pdfforge-api", "version": "1.1.0"}
 
 
 @app.get("/api/samples")
-async def list_samples():
-    """List available sample PDFs."""
+async def list_samples(
+    download: Optional[str] = Query(
+        None, description="Sample PDF filename to download"
+    ),
+):
+    """List available sample PDFs, or download a specific one.
+
+    Without the ``download`` query parameter, returns a JSON list of
+    available sample PDFs.  When ``?download=<filename>`` is provided,
+    returns the actual PDF file as a download.
+    """
+    # ── Download mode: return the requested PDF file ──
+    if download is not None:
+        safe_name = _safe_filename(download)
+        sample_path = SAMPLES_DIR / safe_name
+
+        # Guard against path traversal: ensure resolved path stays
+        # within SAMPLES_DIR
+        try:
+            sample_path.resolve().relative_to(SAMPLES_DIR.resolve())
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid sample filename.",
+            )
+
+        if not sample_path.exists() or not sample_path.is_file():
+            raise HTTPException(
+                status_code=404,
+                detail=f"Sample PDF '{safe_name}' not found.",
+            )
+
+        return FileResponse(
+            path=str(sample_path),
+            media_type="application/pdf",
+            filename=safe_name,
+        )
+
+    # ── List mode: return JSON metadata for all sample PDFs ──
     samples = []
     if SAMPLES_DIR.exists():
         for f in sorted(SAMPLES_DIR.iterdir()):
@@ -118,15 +225,16 @@ async def analyze_pdf(file: UploadFile = File(...)):
     Upload a flat PDF and get the detected form field schema as JSON.
 
     Returns:
-        { "fields": [...], "page_count": N, "field_count": M }
+        { "fields": [...], "page_count": N, "page_sizes": [...], "field_count": M }
     """
-    # Read file content to check size
+    # Read file content to check size and validate
     content = await file.read()
-    _validate_pdf(file.filename or "", len(content))
+    _validate_pdf(file.filename or "", len(content), content=content)
 
     tmp_dir = tempfile.mkdtemp(prefix="pdfforge_")
     try:
-        pdf_path = os.path.join(tmp_dir, file.filename or "input.pdf")
+        safe_name = _safe_filename(file.filename or "input.pdf")
+        pdf_path = os.path.join(tmp_dir, safe_name)
         with open(pdf_path, "wb") as f:
             f.write(content)
 
@@ -139,15 +247,26 @@ async def analyze_pdf(file: UploadFile = File(...)):
                 detail=f"Field detection failed: {str(e)}",
             )
 
-        # Get page count
-        import fitz
-        doc = fitz.open(pdf_path)
-        page_count = len(doc)
-        page_sizes = []
-        for pno in range(page_count):
-            page = doc[pno]
-            page_sizes.append({"width": page.rect.width, "height": page.rect.height})
-        doc.close()
+        # Get page count and sizes — wrap in try/finally to ensure
+        # the PyMuPDF document is always closed, even on error
+        try:
+            doc = fitz.open(pdf_path)
+        except Exception as e:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Failed to open PDF: {str(e)}",
+            )
+        try:
+            page_count = len(doc)
+            page_sizes = []
+            for pno in range(page_count):
+                page = doc[pno]
+                page_sizes.append({
+                    "width": page.rect.width,
+                    "height": page.rect.height,
+                })
+        finally:
+            doc.close()
 
         return JSONResponse({
             "fields": fields,
@@ -164,6 +283,7 @@ async def analyze_pdf(file: UploadFile = File(...)):
 async def generate_pdf(
     file: UploadFile = File(...),
     fields_json: Optional[str] = Form(None),
+    background_tasks: BackgroundTasks = BackgroundTasks(),
 ):
     """
     Upload a flat PDF and get a fillable PDF back.
@@ -174,11 +294,13 @@ async def generate_pdf(
     Returns the fillable PDF as a file download.
     """
     content = await file.read()
-    _validate_pdf(file.filename or "", len(content))
+    _validate_pdf(file.filename or "", len(content), content=content)
 
     tmp_dir = tempfile.mkdtemp(prefix="pdfforge_gen_")
+    response_prepared = False  # track whether FileResponse is about to be returned
     try:
-        pdf_path = os.path.join(tmp_dir, file.filename or "input.pdf")
+        safe_name = _safe_filename(file.filename or "input.pdf")
+        pdf_path = os.path.join(tmp_dir, safe_name)
         with open(pdf_path, "wb") as f:
             f.write(content)
 
@@ -191,6 +313,9 @@ async def generate_pdf(
                     status_code=400,
                     detail="Invalid fields_json: not valid JSON.",
                 )
+            # Validate field structure to prevent unhandled errors
+            # downstream in generate_fillable_pdf
+            _validate_fields(fields)
         else:
             try:
                 fields = detect_fields(pdf_path, verbose=False)
@@ -207,20 +332,38 @@ async def generate_pdf(
             )
 
         # Generate fillable PDF
-        base_name = Path(file.filename or "input.pdf").stem
+        base_name = Path(safe_name).stem
         output_name = f"{base_name}_fillable.pdf"
         output_path = os.path.join(tmp_dir, output_name)
 
         try:
-            generate_fillable_pdf(pdf_path, fields, output_path=output_path, verbose=False)
+            generate_fillable_pdf(
+                pdf_path, fields, output_path=output_path, verbose=False
+            )
         except Exception as e:
             raise HTTPException(
                 status_code=500,
                 detail=f"PDF generation failed: {str(e)}",
             )
 
-        # Verify
-        verification = verify_acroform_fields(output_path)
+        # Verify AcroForm fields were embedded
+        try:
+            verification = verify_acroform_fields(output_path)
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"PDF verification failed: {str(e)}",
+            )
+
+        # Compute page count from field data (max page index + 1)
+        page_count = max(f["page"] for f in fields) + 1 if fields else 0
+
+        # Schedule cleanup of the temp directory AFTER the response
+        # has been fully streamed to the client.  BackgroundTasks
+        # run after the response is sent, so the output file will
+        # still exist when FileResponse reads it.
+        background_tasks.add_task(shutil.rmtree, tmp_dir, ignore_errors=True)
+        response_prepared = True
 
         return FileResponse(
             output_path,
@@ -228,17 +371,25 @@ async def generate_pdf(
             filename=output_name,
             headers={
                 "X-Field-Count": str(verification["total_fields"]),
-                "X-Page-Count": str(len(fields)),
+                "X-Page-Count": str(page_count),
             },
         )
 
-    finally:
-        # Clean up input file but keep output until response sent
-        # FastAPI handles this via background tasks, but we clean tmp_dir
-        # after the response is streamed. Using a slight delay.
-        pass  # tmp_dir will be cleaned by OS temp rotation; we can't delete
-              # before FileResponse streams it. This is acceptable for short-lived
-              # temp files in a server environment.
+    except HTTPException:
+        # On any error before the response is prepared, clean up
+        # the temp directory immediately.  If the response was
+        # already prepared, the BackgroundTask handles cleanup.
+        if not response_prepared:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
+    except Exception as e:
+        # Catch-all for any unexpected error not already handled
+        if not response_prepared:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Unexpected error during PDF generation: {str(e)}",
+        )
 
 
 @app.get("/")
@@ -247,7 +398,12 @@ async def root():
     return {
         "name": "pdfforge API",
         "docs": "/docs",
-        "endpoints": ["/api/health", "/api/samples", "/api/analyze-pdf", "/api/generate-pdf"],
+        "endpoints": [
+            "/api/health",
+            "/api/samples",
+            "/api/analyze-pdf",
+            "/api/generate-pdf",
+        ],
     }
 
 
