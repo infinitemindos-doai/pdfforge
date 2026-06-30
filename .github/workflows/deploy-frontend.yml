@@ -36,7 +36,7 @@ jobs:
       - name: Build
         working-directory: web
         env:
-          VITE_API_URL: https://pdfforge-api.onrender.com
+          VITE_API_URL: https://favorites-tiger-contains-impossible.trycloudflare.com
         run: npm run build
 
       - name: Upload artifact
