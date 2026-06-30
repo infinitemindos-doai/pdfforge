@@ -1,9 +1,14 @@
 __pycache__/
 *.pyc
 .venv/
+.venv-crewai/
 .pytest_cache/
 *.egg-info/
 .DS_Store
+
+# CrewAI
+crew/crew_run.log
+crew/__pycache__/
 
 # Web frontend
 web/node_modules/

@@ -1,5 +1,5 @@
 """
-pdfforge/api/app.py — FastAPI backend for pdfforge web app.
+pdfforge/api/app.py — FastAPI backend for pdfforge web app (v1.2.0 production-hardened).
 
 Endpoints:
   GET  /api/health       — health check
@@ -12,6 +12,7 @@ Endpoints:
 from __future__ import annotations
 
 import os
+import logging
 import re
 import sys
 import tempfile
@@ -21,11 +22,22 @@ from pathlib import Path
 from typing import Optional, List
 
 import fitz  # PyMuPDF
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.background import BackgroundTasks
+from starlette.middleware.base import BaseHTTPMiddleware
 import uvicorn
+
+# Rate limiting
+try:
+    from slowapi import Limiter
+    from slowapi.util import get_remote_address
+    from slowapi.errors import RateLimitExceeded
+    from slowapi.middleware import SlowAPIMiddleware
+    SLOWAPI_AVAILABLE = True
+except ImportError:
+    SLOWAPI_AVAILABLE = False
 
 # ── Import detector & generator from parent directory ──────────────────
 PARENT_DIR = Path(__file__).resolve().parent.parent
@@ -33,6 +45,17 @@ sys.path.insert(0, str(PARENT_DIR))
 
 from detector import detect_fields, detect_fields_json
 from generator import generate_fillable_pdf, verify_acroform_fields
+
+# ── Environment ─────────────────────────────────────────────────────────
+ENV = os.environ.get("ENV", "development").lower()
+IS_PRODUCTION = ENV == "production"
+
+# ── Logging ────────────────────────────────────────────────────────────
+logger = logging.getLogger("pdfforge")
+logging.basicConfig(
+    level=logging.INFO if IS_PRODUCTION else logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
 
 # ── Config ──────────────────────────────────────────────────────────────
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
@@ -50,23 +73,74 @@ ALLOWED_ORIGINS = [
     "http://127.0.0.1:5174",
     "http://127.0.0.1:3000",
 ]
+# Remove localhost origins in production
+if IS_PRODUCTION:
+    ALLOWED_ORIGINS = [o for o in ALLOWED_ORIGINS if "localhost" not in o and "127.0.0.1" not in o]
 
-# Sample PDFs live in the project root
-SAMPLES_DIR = PARENT_DIR
+# Sample PDFs live in a dedicated directory
+SAMPLES_DIR = PARENT_DIR / "samples"
 
 app = FastAPI(
     title="pdfforge API",
     description="Detect form fields in flat PDFs and generate fillable PDFs.",
-    version="1.1.0",
+    version="1.2.0",
+    docs_url=None if IS_PRODUCTION else "/docs",
+    redoc_url=None if IS_PRODUCTION else "/redoc",
+    openapi_url=None if IS_PRODUCTION else "/openapi.json",
 )
+
+
+# ── Security Headers Middleware ────────────────────────────────────────
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+        if IS_PRODUCTION:
+            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains; preload"
+            response.headers["Content-Security-Policy"] = "default-src 'self'"
+        return response
+
+app.add_middleware(SecurityHeadersMiddleware)
+
+
+# ── Request Size Limit Middleware ──────────────────────────────────────
+class RequestSizeLimitMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        cl = request.headers.get("content-length")
+        if cl and int(cl) > MAX_UPLOAD_BYTES + 1024:
+            return JSONResponse(
+                status_code=413,
+                content={"detail": f"Request body too large. Maximum {MAX_UPLOAD_BYTES // (1024*1024)} MB."},
+            )
+        return await call_next(request)
+
+app.add_middleware(RequestSizeLimitMiddleware)
+
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
 )
+
+# ── Rate Limiter ───────────────────────────────────────────────────────
+if SLOWAPI_AVAILABLE:
+    limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
+    app.state.limiter = limiter
+    app.add_middleware(SlowAPIMiddleware)
+
+    @app.exception_handler(RateLimitExceeded)
+    async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Rate limit exceeded. Please slow down."},
+        )
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────
@@ -164,7 +238,7 @@ def _validate_fields(fields: list) -> None:
 @app.get("/api/health")
 async def health():
     """Health check endpoint."""
-    return {"status": "healthy", "service": "pdfforge-api", "version": "1.1.0"}
+    return {"status": "healthy", "service": "pdfforge-api", "version": "1.2.0"}
 
 
 @app.get("/api/samples")
@@ -244,8 +318,9 @@ async def analyze_pdf(file: UploadFile = File(...)):
         except Exception as e:
             raise HTTPException(
                 status_code=422,
-                detail=f"Field detection failed: {str(e)}",
+                detail="Field detection failed. The PDF may be corrupted or use unsupported features.",
             )
+            logger.exception("Field detection failed for uploaded PDF")
 
         # Get page count and sizes — wrap in try/finally to ensure
         # the PyMuPDF document is always closed, even on error
@@ -254,8 +329,9 @@ async def analyze_pdf(file: UploadFile = File(...)):
         except Exception as e:
             raise HTTPException(
                 status_code=422,
-                detail=f"Failed to open PDF: {str(e)}",
+                detail="Failed to open PDF. The file may be corrupted.",
             )
+            logger.exception("Failed to open uploaded PDF with PyMuPDF")
         try:
             page_count = len(doc)
             page_sizes = []
@@ -322,8 +398,9 @@ async def generate_pdf(
             except Exception as e:
                 raise HTTPException(
                     status_code=422,
-                    detail=f"Field detection failed: {str(e)}",
+                    detail="Field detection failed. The PDF may be corrupted or use unsupported features.",
                 )
+                logger.exception("Field detection failed for uploaded PDF in generate-pdf")
 
         if not fields:
             raise HTTPException(
@@ -343,8 +420,9 @@ async def generate_pdf(
         except Exception as e:
             raise HTTPException(
                 status_code=500,
-                detail=f"PDF generation failed: {str(e)}",
+                detail="PDF generation failed. Please try again or contact support.",
             )
+            logger.exception("PDF generation failed")
 
         # Verify AcroForm fields were embedded
         try:
@@ -352,8 +430,9 @@ async def generate_pdf(
         except Exception as e:
             raise HTTPException(
                 status_code=500,
-                detail=f"PDF verification failed: {str(e)}",
+                detail="PDF verification failed. Please try again.",
             )
+            logger.exception("AcroForm verification failed")
 
         # Compute page count from field data (max page index + 1)
         page_count = max(f["page"] for f in fields) + 1 if fields else 0
@@ -388,13 +467,16 @@ async def generate_pdf(
             shutil.rmtree(tmp_dir, ignore_errors=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Unexpected error during PDF generation: {str(e)}",
+            detail="An unexpected error occurred. Please try again.",
         )
+        logger.exception("Unexpected error during PDF generation")
 
 
 @app.get("/")
 async def root():
     """Root endpoint — redirect info."""
+    if IS_PRODUCTION:
+        return {"name": "pdfforge API", "version": "1.2.0"}
     return {
         "name": "pdfforge API",
         "docs": "/docs",
@@ -408,4 +490,19 @@ async def root():
 
 
 if __name__ == "__main__":
-    uvicorn.run("api.app:app", host="0.0.0.0", port=8000, reload=True)
+    if IS_PRODUCTION:
+        uvicorn.run(
+            "api.app:app",
+            host="127.0.0.1",
+            port=8000,
+            reload=False,
+            workers=2,
+            log_level="info",
+        )
+    else:
+        uvicorn.run(
+            "api.app:app",
+            host="0.0.0.0",
+            port=8000,
+            reload=True,
+        )

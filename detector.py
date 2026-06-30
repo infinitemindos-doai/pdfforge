@@ -202,12 +202,14 @@ def _detect_checkboxes(
     cv_img: np.ndarray,
     page_width: float,
     page_height: float,
+    text_blocks: list,
     min_size_pt: float = 8,
     max_size_pt: float = 25,
     dpi: int = 200,
 ) -> List[dict]:
     """
     Detect small square/rectangle shapes that look like checkboxes.
+    Filters out false positives that overlap with text content.
     Returns list of {x, y, width, height} dicts.
     """
     gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
@@ -223,19 +225,56 @@ def _detect_checkboxes(
     min_px = int(min_size_pt * dpi / 72)
     max_px = int(max_size_pt * dpi / 72)
 
+    # Build a set of text bounding boxes (in pixel coordinates) for overlap checking
+    text_px_boxes = []
+    for blk in text_blocks:
+        tx0 = int(blk["x0"] * dpi / 72)
+        ty0 = int(blk["y0"] * dpi / 72)
+        tx1 = int(blk["x1"] * dpi / 72)
+        ty1 = int(blk["y1"] * dpi / 72)
+        text_px_boxes.append((tx0, ty0, tx1, ty1))
+
+    def _overlaps_text(x, y, cw, ch):
+        """Check if a bounding rect overlaps any text block by more than 40%."""
+        area = cw * ch
+        if area <= 0:
+            return False
+        for tx0, ty0, tx1, ty1 in text_px_boxes:
+            ix = max(0, min(x + cw, tx1) - max(x, tx0))
+            iy = max(0, min(y + ch, ty1) - max(y, ty0))
+            overlap = ix * iy
+            if overlap / area > 0.4:
+                return True
+        return False
+
     checkboxes = []
     for cnt in contours:
         x, y, cw, ch = cv2.boundingRect(cnt)
         # Must be roughly square and within size bounds
         aspect = cw / ch if ch > 0 else 0
-        if (min_px <= cw <= max_px and
+        if not (min_px <= cw <= max_px and
                 min_px <= ch <= max_px and
                 0.7 <= aspect <= 1.3):
-            px = x * scale
-            py = y * scale
-            pw = cw * scale
-            ph = ch * scale
-            checkboxes.append({"x": px, "y": py, "width": pw, "height": ph})
+            continue
+        # Skip if this candidate overlaps with text content (false positive)
+        if _overlaps_text(x, y, cw, ch):
+            continue
+        # Additional filter: check if the contour has a hollow interior
+        # (real checkboxes are drawn as outlines, text characters are filled)
+        mask = np.zeros((h, w), dtype=np.uint8)
+        cv2.drawContours(mask, [cnt], -1, 255, thickness=cv2.FILLED)
+        inner = mask[y+2:y+ch-2, x+2:x+cw-2]
+        if inner.size > 0:
+            fill_ratio = np.count_nonzero(inner) / inner.size
+            # Real checkboxes should have low fill ratio (hollow center)
+            if fill_ratio > 0.3:
+                continue
+
+        px = x * scale
+        py = y * scale
+        pw = cw * scale
+        ph = ch * scale
+        checkboxes.append({"x": px, "y": py, "width": pw, "height": ph})
 
     return checkboxes
 
@@ -367,7 +406,7 @@ def detect_fields(pdf_path: str, verbose: bool = False) -> List[dict]:
             ))
 
         # Checkboxes
-        checkboxes = _detect_checkboxes(cv_img, pw, ph, dpi=dpi)
+        checkboxes = _detect_checkboxes(cv_img, pw, ph, blocks, dpi=dpi)
         for cb in checkboxes:
             if any(_overlap(cb, {"x": f.x, "y": f.y, "width": f.width, "height": f.height})
                    for f in all_fields if f.page == pno):
