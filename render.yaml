@@ -1,0 +1,22 @@
+# Render.com service configuration for pdfforge API
+# Deploy this as a Web Service on Render
+# https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: pdfforge-api
+    runtime: python
+    region: oregon
+    plan: free
+    buildCommand: pip install -r api/requirements.txt
+    startCommand: uvicorn api.app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+    # The repo root is the build context; api/ is a subdir
+    rootDir: .
+    # Pull from GitHub repo
+    repo: https://github.com/infinitemindos-doai/pdfforge.git
+    branch: main

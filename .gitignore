@@ -4,3 +4,14 @@ __pycache__/
 .pytest_cache/
 *.egg-info/
 .DS_Store
+
+# Web frontend
+web/node_modules/
+web/dist/
+web/.vite/
+web/npm-debug.log*
+web/.env.local
+
+# API
+tmp/
+*.tmp

@@ -84,15 +84,74 @@ pytest test/ -v
 
 Tests create their own sample PDF fixture (no external PDF needed).
 
+## Web App
+
+pdfforge also has a full web UI — upload a PDF in your browser, see detected
+fields overlaid on the page, and download a fillable PDF with one click.
+
+### Quick Start (Web)
+
+```bash
+# Terminal 1 — Backend
+cd pdfforge
+source .venv/bin/activate
+pip install -r api/requirements.txt
+uvicorn api.app:app --port 8000 --reload
+
+# Terminal 2 — Frontend
+cd pdfforge/web
+npm install
+npm run dev
+# Open http://localhost:5173
+```
+
+See [WEB-DEPLOY.md](WEB-DEPLOY.md) for full deployment instructions
+(Render backend + GitHub Pages frontend).
+
+### Web App Features
+
+- 🎨 Dark theme UI with electric blue accents
+- 📄 Drag-and-drop PDF upload
+- 🔍 Auto-detect text fields, checkboxes, and table cells
+- 👁️ Visual field overlay on rendered PDF pages
+- 📋 Field list sidebar with type icons and labels
+- ⬇️ One-click download of fillable PDF
+- 📱 Mobile responsive
+
 ## Project Structure
 
 ```
 pdfforge/
-├── main.py          # CLI interface (argparse)
-├── detector.py      # Field detection engine (OpenCV + pdfplumber + PyMuPDF)
-├── generator.py     # AcroForm field embedding (PyMuPDF)
-├── requirements.txt # Pinned dependencies
-├── README.md        # This file
+├── main.py              # CLI interface (argparse)
+├── detector.py          # Field detection engine (OpenCV + pdfplumber + PyMuPDF)
+├── generator.py         # AcroForm field embedding (PyMuPDF)
+├── requirements.txt     # CLI pinned dependencies
+├── api/                 # Backend — FastAPI REST API
+│   ├── __init__.py
+│   ├── app.py           # Endpoints: analyze-pdf, generate-pdf, health, samples
+│   └── requirements.txt # Backend dependencies
+├── web/                 # Frontend — React + Vite
+│   ├── index.html
+│   ├── package.json
+│   ├── vite.config.js
+│   ├── .env.production   # Production API URL
+│   ├── public/
+│   │   └── favicon.svg
+│   └── src/
+│       ├── main.jsx
+│       ├── App.jsx
+│       ├── api.js
+│       ├── styles.css
+│       └── components/
+│           ├── Header.jsx
+│           ├── UploadZone.jsx
+│           ├── PdfViewer.jsx
+│           └── FieldList.jsx
+├── render.yaml          # Render.com backend deploy config
+├── .github/workflows/
+│   └── deploy-frontend.yml  # GitHub Pages frontend deploy
+├── WEB-DEPLOY.md       # Web app setup & deployment guide
+├── README.md           # This file
 └── test/
     ├── fixtures.py        # Sample PDF generator
     ├── test_detector.py   # Detection tests
@@ -107,6 +166,8 @@ pdfforge/
 - **opencv-python** — Rasterized page analysis for line/shape detection
 - **pillow** — Image handling (rasterization bridge)
 - **pytest** — Test framework
+- **FastAPI** + **uvicorn** — Web API backend
+- **React** + **Vite** — Web frontend
 
 ## Limitations
 
