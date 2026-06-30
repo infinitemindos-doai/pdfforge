@@ -11,7 +11,9 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
 const TYPE_COLORS = {
   text: { stroke: '#00d4ff', fill: 'rgba(0, 212, 255, 0.15)', label: 'Text' },
   checkbox: { stroke: '#ff9f43', fill: 'rgba(255, 159, 67, 0.20)', label: 'Checkbox' },
+  radio: { stroke: '#ee5a6f', fill: 'rgba(238, 90, 111, 0.20)', label: 'Radio' },
   table_cell: { stroke: '#10ac84', fill: 'rgba(16, 172, 132, 0.15)', label: 'Table Cell' },
+  textarea: { stroke: '#a78bfa', fill: 'rgba(167, 139, 250, 0.15)', label: 'Text Area' },
 }
 
 export default function PdfViewer({ pdfData, fields, pageSizes, loading }) {
@@ -20,6 +22,8 @@ export default function PdfViewer({ pdfData, fields, pageSizes, loading }) {
   const [renderedPages, setRenderedPages] = useState({})
   const [pdfError, setPdfError] = useState(null)
   const canvasRefs = useRef({})
+
+  const [zoomLevel, setZoomLevel] = useState(1.5)
 
   // Load PDF document
   useEffect(() => {
@@ -62,7 +66,7 @@ export default function PdfViewer({ pdfData, fields, pageSizes, loading }) {
       if (!canvas) return
 
       const page = await pdfDoc.getPage(pageNum)
-      const viewport = page.getViewport({ scale: 1.5 })
+      const viewport = page.getViewport({ scale: zoomLevel })
       const ctx = canvas.getContext('2d')
 
       // Use device pixel ratio for sharpness
@@ -83,7 +87,7 @@ export default function PdfViewer({ pdfData, fields, pageSizes, loading }) {
     renderPage(currentPage).catch((err) => {
       console.error('Page render error:', err)
     })
-  }, [pdfDoc, currentPage])
+  }, [pdfDoc, currentPage, zoomLevel])
 
   // Also render adjacent pages for smooth scrolling
   useEffect(() => {
@@ -94,7 +98,7 @@ export default function PdfViewer({ pdfData, fields, pageSizes, loading }) {
           const canvas = canvasRefs.current[p]
           if (!canvas) return
           const page = await pdfDoc.getPage(p)
-          const viewport = page.getViewport({ scale: 1.5 })
+          const viewport = page.getViewport({ scale: zoomLevel })
           const ctx = canvas.getContext('2d')
           const dpr = window.devicePixelRatio || 1
           canvas.width = viewport.width * dpr
@@ -112,15 +116,19 @@ export default function PdfViewer({ pdfData, fields, pageSizes, loading }) {
         })
       }
     })
-  }, [pdfDoc, currentPage, renderedPages])
+  }, [pdfDoc, currentPage, renderedPages, zoomLevel])
 
   const numPages = pdfDoc?.numPages || 0
 
   // Get scale: PDF.js renders at 1.5x, PDF coords are at 1x
   // So to overlay fields correctly: field_coords * (rendered_width / pdf_width)
   const getScale = (pageNum) => {
-    if (!renderedPages[pageNum] || !pageSizes[pageNum - 1]) return 1.5
-    return renderedPages[pageNum].width / pageSizes[pageNum - 1].width
+    if (!renderedPages[pageNum] || !pageSizes[pageNum - 1]) return zoomLevel
+    const dpr = window.devicePixelRatio || 1
+    // renderedPages stores viewport.width (PDF width * scale), but field positions
+    // need to map to CSS pixels (viewport.width / dpr). So:
+    // css_scale = (viewport.width / dpr) / pdf_width = (pdf_width * scale / dpr) / pdf_width = scale / dpr
+    return (renderedPages[pageNum].width / pageSizes[pageNum - 1].width) / dpr
   }
 
   const pageFields = (fields || []).filter((f) => f.page === currentPage - 1)
@@ -176,6 +184,25 @@ export default function PdfViewer({ pdfData, fields, pageSizes, loading }) {
             >
               Next →
             </button>
+            <div className="zoom-controls" role="group" aria-label="Zoom controls">
+              <button
+                className="page-btn"
+                onClick={() => setZoomLevel(z => Math.max(0.5, z - 0.25))}
+                disabled={zoomLevel <= 0.5}
+                aria-label="Zoom out"
+              >
+                −
+              </button>
+              <span className="zoom-level">{Math.round(zoomLevel * 100)}%</span>
+              <button
+                className="page-btn"
+                onClick={() => setZoomLevel(z => Math.min(3.0, z + 0.25))}
+                disabled={zoomLevel >= 3.0}
+                aria-label="Zoom in"
+              >
+                +
+              </button>
+            </div>
           </div>
 
           <div className="pdf-canvas-wrapper">

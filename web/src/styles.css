@@ -400,6 +400,20 @@ html, body {
   text-align: center;
 }
 
+.zoom-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.zoom-level {
+  font-size: 13px;
+  color: var(--text-secondary);
+  min-width: 40px;
+  text-align: center;
+}
+
 .pdf-canvas-wrapper {
   flex: 1;
   overflow-y: auto;

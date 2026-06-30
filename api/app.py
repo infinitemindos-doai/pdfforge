@@ -202,7 +202,7 @@ def _validate_fields(fields: list) -> None:
             detail="fields_json must be a JSON array of field objects.",
         )
     required_keys = {"page", "type", "x", "y", "width", "height"}
-    valid_types = {"text", "checkbox", "table_cell"}
+    valid_types = {"text", "checkbox", "radio", "table_cell", "textarea"}
     for i, f in enumerate(fields):
         if not isinstance(f, dict):
             raise HTTPException(
@@ -316,22 +316,22 @@ async def analyze_pdf(file: UploadFile = File(...)):
         try:
             fields = detect_fields(pdf_path, verbose=False)
         except Exception as e:
+            logger.exception("Field detection failed for uploaded PDF")
             raise HTTPException(
                 status_code=422,
                 detail="Field detection failed. The PDF may be corrupted or use unsupported features.",
             )
-            logger.exception("Field detection failed for uploaded PDF")
 
         # Get page count and sizes — wrap in try/finally to ensure
         # the PyMuPDF document is always closed, even on error
         try:
             doc = fitz.open(pdf_path)
         except Exception as e:
+            logger.exception("Failed to open uploaded PDF with PyMuPDF")
             raise HTTPException(
                 status_code=422,
                 detail="Failed to open PDF. The file may be corrupted.",
             )
-            logger.exception("Failed to open uploaded PDF with PyMuPDF")
         try:
             page_count = len(doc)
             page_sizes = []
@@ -344,11 +344,17 @@ async def analyze_pdf(file: UploadFile = File(...)):
         finally:
             doc.close()
 
+        # Build field type summary
+        type_summary = {}
+        for f in fields:
+            type_summary[f.get("type", "unknown")] = type_summary.get(f.get("type", "unknown"), 0) + 1
+
         return JSONResponse({
             "fields": fields,
             "page_count": page_count,
             "page_sizes": page_sizes,
             "field_count": len(fields),
+            "type_summary": type_summary,
         })
 
     finally:
@@ -396,11 +402,11 @@ async def generate_pdf(
             try:
                 fields = detect_fields(pdf_path, verbose=False)
             except Exception as e:
+                logger.exception("Field detection failed for uploaded PDF in generate-pdf")
                 raise HTTPException(
                     status_code=422,
                     detail="Field detection failed. The PDF may be corrupted or use unsupported features.",
                 )
-                logger.exception("Field detection failed for uploaded PDF in generate-pdf")
 
         if not fields:
             raise HTTPException(
@@ -418,21 +424,21 @@ async def generate_pdf(
                 pdf_path, fields, output_path=output_path, verbose=False
             )
         except Exception as e:
+            logger.exception("PDF generation failed")
             raise HTTPException(
                 status_code=500,
                 detail="PDF generation failed. Please try again or contact support.",
             )
-            logger.exception("PDF generation failed")
 
         # Verify AcroForm fields were embedded
         try:
             verification = verify_acroform_fields(output_path)
         except Exception as e:
+            logger.exception("AcroForm verification failed")
             raise HTTPException(
                 status_code=500,
                 detail="PDF verification failed. Please try again.",
             )
-            logger.exception("AcroForm verification failed")
 
         # Compute page count from field data (max page index + 1)
         page_count = max(f["page"] for f in fields) + 1 if fields else 0
@@ -465,11 +471,11 @@ async def generate_pdf(
         # Catch-all for any unexpected error not already handled
         if not response_prepared:
             shutil.rmtree(tmp_dir, ignore_errors=True)
+        logger.exception("Unexpected error during PDF generation")
         raise HTTPException(
             status_code=500,
             detail="An unexpected error occurred. Please try again.",
         )
-        logger.exception("Unexpected error during PDF generation")
 
 
 @app.get("/")

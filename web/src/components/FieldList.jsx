@@ -1,7 +1,9 @@
 const TYPE_ICONS = {
   text: { icon: 'T', color: '#00d4ff', label: 'Text Field' },
   checkbox: { icon: '☑', color: '#ff9f43', label: 'Checkbox' },
+  radio: { icon: '◯', color: '#ee5a6f', label: 'Radio Button' },
   table_cell: { icon: '▦', color: '#10ac84', label: 'Table Cell' },
+  textarea: { icon: '¶', color: '#a78bfa', label: 'Text Area' },
 }
 
 export default function FieldList({ fields, fieldCount, loading }) {
