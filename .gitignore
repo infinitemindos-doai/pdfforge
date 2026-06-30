@@ -14,4 +14,4 @@ web/.env.local
 
 # API
 tmp/
-*.tmp
+*.tmp.github/

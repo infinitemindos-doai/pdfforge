@@ -97,13 +97,76 @@ curl -X POST http://localhost:8000/api/generate-pdf \
 
 ### Frontend → GitHub Pages
 
-1. Go to your GitHub repo Settings → Pages
-2. Source: "GitHub Actions"
-3. The workflow in `.github/workflows/deploy-frontend.yml` will:
-   - Install npm dependencies
-   - Build the Vite app with `VITE_API_URL` pointing to your Render backend
-   - Deploy `web/dist/` to GitHub Pages
-4. Your frontend will be at: `https://infinitemindos-doai.github.io/pdfforge/`
+The GitHub Actions workflow file (`.github/workflows/deploy-frontend.yml`) requires
+`workflow` scope on your GitHub token to push via git. If your token doesn't have
+that scope, create it manually:
+
+1. Go to your GitHub repo → **Actions** → **New workflow** → **set up a workflow yourself**
+2. Name it `deploy-frontend.yml`
+3. Paste the following content:
+
+```yaml
+name: Deploy Frontend to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'web/**'
+      - '.github/workflows/deploy-frontend.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        working-directory: web
+        run: npm ci || npm install
+
+      - name: Build
+        working-directory: web
+        env:
+          VITE_API_URL: https://pdfforge-api.onrender.com
+        run: npm run build
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+```
+
+4. Commit the file directly on GitHub
+5. Go to **Settings** → **Pages** → Source: **GitHub Actions**
+6. Your frontend will be at: `https://infinitemindos-doai.github.io/pdfforge/`
 
 ### Updating the API URL
 
