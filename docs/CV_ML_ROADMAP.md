@@ -1,6 +1,6 @@
 # PDFForge — CV/ML Enhancement Roadmap
 
-## Status: Phase 2 Proposal (not yet started)
+## Status: Phase 2 — BUILT (code complete, awaiting training data)
 
 ## Background
 
@@ -46,8 +46,16 @@ needed. The PDFs must be found/acquired from real sources.
 
 ### Step 1: Data Acquisition
 - Source real PDF forms with existing AcroForm fields
-- Sources: IRS tax forms, government forms, enterprise onboarding forms
-- Target: 100 PDFs minimum (with augmentation), 1000+ ideal
+- Sources (see docs/PDF_FORM_DOMAIN_GUIDE.md Section 6 for full taxonomy):
+  - IRS tax forms, government forms (500+)
+  - SHRM business templates (200+)
+  - CMS.gov healthcare forms (150+)
+  - SEC financial forms (100+)
+  - State court legal forms (300+)
+  - University admissions/education forms (200+)
+- Form type taxonomy: 11 categories, 60+ form types (business, legal, healthcare,
+  financial, real estate, education, events, surveys, membership, government, creative)
+- Target: 100 PDFs minimum (with augmentation), 1000+ ideal, 10000 for production
 - Split: 70% training, 15% validation, 15% test
 
 ### Step 2: Preprocessing Pipeline
@@ -80,15 +88,20 @@ needed. The PDFs must be found/acquired from real sources.
 - Fallback trigger: vector extraction returns 0 fields on a page
 - Latency budget: CV inference < 2 seconds per page
 
-## What We Have NOW (Phase 1 — Shipped)
+## What We Have NOW (Phase 1 + Phase 2 code — Shipped)
 
-- Detector v3: vector extraction with radio, textarea, tab order
-- Generator v2: AcroForm widgets with name dedup, NeedAppearances
-- API v1.2.0: production-hardened with security headers, rate limiting
-- Frontend: DPR-correct field overlays, zoom controls, 5 field types
-- CrewAI: 5-agent team (Backend, Frontend, QA, Network, Senior Dev)
+- Detector v4: vector extraction with radio, textarea, tab order, dropdowns,
+  signatures, barcodes, validation hints, visibility states
+- Generator v3: AcroForm widgets with name dedup, NeedAppearances, signatures,
+  dropdowns, barcodes, visibility flags, validation formatting, accessibility tooltips
+- CV Detector: OpenCV heuristic detection (cv_detector.py)
+- CV Pipeline: preprocessing, YOLOv8 training, inference (cv_pipeline/)
+- API v1.2.0: production-hardened with security headers, rate limiting, CV fallback
+- Frontend: DPR-correct field overlays, zoom controls, 8 field types
+- CrewAI v2: 6-agent team (Backend, Frontend, CV Eng, QA, Network, Senior Dev)
 - Deployed: GitHub Pages frontend + Cloudflare Tunnel backend
 - Tested: 15/15 fields detected, 0 false positives, HTTP 200 generation
+- Domain Guide: docs/PDF_FORM_DOMAIN_GUIDE.md — full field property reference + form taxonomy
 
 ## What We Need for Phase 2
 

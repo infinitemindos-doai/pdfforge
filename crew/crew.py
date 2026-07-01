@@ -116,7 +116,7 @@ cv_engineer = Agent(
 
 qa_tester = Agent(
     role="QA Tester",
-    goal="Test the pdfforge application end-to-end with a dedicated test dataset covering digital PDFs, scanned PDFs, edge cases, and CV pipeline validation. Produce a comprehensive QA report with pass/fail status for each test case.",
+    goal="Test the pdfforge application end-to-end with a dedicated test dataset covering digital PDFs, scanned PDFs, edge cases, CV pipeline validation, and real-world form type taxonomy. Produce a comprehensive QA report with pass/fail status for each test case.",
     backstory="""You are a meticulous QA engineer with 8 years of experience testing
     document processing applications. You have a DEDICATED test dataset that you
     create and manage. Your test suite covers:
@@ -130,17 +130,35 @@ qa_tester = Agent(
     - edge_empty.pdf — completely empty PDF
     - edge_tiny.pdf — 1x1 pixel PDF
 
+    FORM TYPE TAXONOMY (real-world form categories to test against):
+    - Business/Admin: job application, onboarding, timesheet, expense, invoice, NDA, W-9
+    - Legal/Contracts: service agreement, lease, power of attorney, waiver
+    - Healthcare/Intake: patient intake, HIPAA consent, insurance claim
+    - Financial/Investment: loan application, KYC form, account opening
+    - Real Estate: rental application, inspection checklist, purchase offer
+    - Education: enrollment form, scholarship application, permission slip
+    - Events: registration, RSVP, sponsorship agreement
+    - Surveys: satisfaction survey, feedback form, questionnaire
+    - Membership: application, subscription order, renewal
+    - Government: permit application, tax filing, FOIA request, grant application
+    - Creative/Content: model release, collaboration agreement, talent intake
+
     TEST SCENARIOS:
     1. Digital PDF field detection (vector extraction)
     2. Scanned PDF field detection (CV fallback)
     3. False positive regression (text-only PDF = 0 fields)
     4. Fillable PDF generation and AcroForm verification
     5. API health, CORS, rate limiting
-    6. Field type accuracy (text vs checkbox vs table_cell vs textarea vs radio)
+    6. Field type accuracy (text vs checkbox vs table_cell vs textarea vs radio
+       vs dropdown vs signature vs barcode)
     7. Label accuracy (fields labeled correctly from nearby text)
     8. Tab order (fields in top-to-bottom, left-to-right reading order)
-    9. CV pipeline validation (preprocessing, augmentation, inference)
-    10. End-to-end: upload -> detect -> generate -> download -> verify
+    9. Visibility states (visible, hidden, visible_non_print, hidden_printable)
+    10. Validation hints (numeric, date, currency, email, phone, zip, ssn detected from labels)
+    11. CV pipeline validation (preprocessing, augmentation, inference)
+    12. End-to-end: upload -> detect -> generate -> download -> verify
+    13. Form type coverage: test detector against 3+ form categories from taxonomy
+    14. Accessibility: verify tooltip (TU) set on all fields for screen readers
 
     For each test case you document:
     - Test ID and name
@@ -281,8 +299,10 @@ cv_task = Task(
        - Create a multi-page test PDF
        - Create a large form test PDF
     10. Document what training data is still needed:
-        - How many PDFs needed (100 minimum, 1000+ ideal)
-        - Where to source them (IRS forms, government forms, enterprise forms)
+        - How many PDFs needed (100 minimum, 1000+ ideal, 10000 for production)
+        - Where to source them (see docs/PDF_FORM_DOMAIN_GUIDE.md Section 6)
+        - Form type taxonomy covers 11 categories with 60+ form types
+        - Public sources: IRS.gov (500+), SHRM (200+), CMS.gov (150+), SEC (100+), courts (300+)
         - Data augmentation strategy
     11. Create a branch called 'cv/pipeline-enhancements' and open a PR
 
@@ -320,13 +340,17 @@ qa_task = Task(
     PHASE 3: TEST SCENARIOS
     1. Digital PDF field detection (vector extraction) — all test PDFs
     2. False positive regression — text-only PDF must return 0 fields
-    3. Field type accuracy — verify text/checkbox/table_cell/textarea/radio
+    3. Field type accuracy — verify text/checkbox/table_cell/textarea/radio/dropdown/signature/barcode
     4. Label accuracy — verify labels match nearby text
     5. Tab order — verify fields are in reading order
     6. API health and CORS
     7. Rate limiting test
     8. CV pipeline validation — run CV detection on all PDFs, compare with vector
-    9. End-to-end: upload -> detect -> generate -> download -> verify
+    9. Visibility states — verify hidden/visible_non_print/hidden_printable flags work
+    10. Validation hints — verify numeric/date/currency/email/phone/zip/ssn detection from labels
+    11. Accessibility — verify tooltip (TU) set on all fields for screen readers
+    12. End-to-end: upload -> detect -> generate -> download -> verify
+    13. Form type coverage — test detector against 3+ form categories from the taxonomy in docs/PDF_FORM_DOMAIN_GUIDE.md
 
     PHASE 4: QA REPORT
     Write a comprehensive QA report with:

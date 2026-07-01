@@ -62,7 +62,8 @@ def test_detector_finds_checkboxes(sample_pdf):
 def test_detector_field_types_valid(sample_pdf):
     """All field types should be one of the valid types."""
     fields = detect_fields(sample_pdf)
-    valid_types = {"text", "checkbox", "table_cell"}
+    valid_types = {"text", "checkbox", "table_cell", "textarea", "radio",
+                   "dropdown", "signature", "barcode"}
     for f in fields:
         assert f["type"] in valid_types, f"Invalid type: {f['type']}"
 

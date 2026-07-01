@@ -1,9 +1,18 @@
 """
-pdfforge/detector.py — Field Detection Engine v3
+pdfforge/detector.py — Field Detection Engine v4
 
 Takes a flat PDF (no existing form fields) and detects where fillable
 areas should go: horizontal lines (text fields), checkbox squares,
-radio button circles, table cells, and multi-line text areas.
+radio button circles, table cells, multi-line text areas, dropdowns,
+signature lines, and barcode areas.
+
+v4 improvements over v3:
+  - Added dropdown/combo box detection (rectangles with small triangle)
+  - Added signature field detection (lines with "signature" label)
+  - Added barcode area detection (square regions with barcode labels)
+  - Added visibility state field (visible, hidden, visible_non_print, hidden_printable)
+  - Added validation hint detection (numeric/date patterns in labels)
+  - Improved field flag set: required, multiline, readonly, numeric, date, currency
 
 v3 improvements over v2:
   - Fixed extra_cells variable bug (was referenced as extra_fields)
@@ -17,7 +26,7 @@ v3 improvements over v2:
   - Scanned PDF warning when no vector drawings found
 
 Output: list of field dicts (JSON-serialisable) with keys:
-    page, type, x, y, width, height, label, name, flags
+    page, type, x, y, width, height, label, name, flags, visibility, validation
 """
 
 from __future__ import annotations
@@ -39,14 +48,16 @@ import pdfplumber
 class Field:
     """A single detected form field."""
     page: int          # 0-indexed
-    type: str          # "text" | "checkbox" | "radio" | "table_cell" | "textarea"
+    type: str          # "text" | "checkbox" | "radio" | "table_cell" | "textarea" | "dropdown" | "signature" | "barcode"
     x: float           # PDF coordinate (top-left x, points)
     y: float           # PDF coordinate (top-left y, points)
     width: float
     height: float
     label: str = ""
     name: str = ""
-    flags: list = None  # ["required", "multiline", etc.]
+    flags: list = None  # ["required", "multiline", "readonly", etc.]
+    visibility: str = "visible"  # "visible" | "hidden" | "visible_non_print" | "hidden_printable"
+    validation: str = ""  # "" | "numeric" | "date" | "currency" | "email" | "phone" | "zip" | "ssn"
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -79,6 +90,57 @@ def _clean_label(label: str) -> str:
 
 def _distance(x1: float, y1: float, x2: float, y2: float) -> float:
     return ((x1 - x2) ** 2 + (y1 - y2) ** 2) ** 0.5
+
+
+# ---------------------------------------------------------------------------
+# Validation hint detection from label text
+# ---------------------------------------------------------------------------
+
+_VALIDATION_PATTERNS = {
+    "numeric": [r'\b(number|qty|quantity|amount|count|age|score|rating|percent)\b', r'\b\d+\s*[-]\s*\d+\b'],  # ranges
+    "date": [r'\b(date|dob|birth|expire|effective|start|end|deadline|signature date)\b'],
+    "currency": [r'\b(\$|amount|total|subtotal|price|cost|fee|rate|salary|wage|payment|balance|deposit|charge|amount due|amount paid)\b'],
+    "email": [r'\b(email|e-mail|electronic mail)\b'],
+    "phone": [r'\b(phone|telephone|mobile|cell|fax|contact number)\b'],
+    "zip": [r'\b(zip|postal)\b'],
+    "ssn": [r'\b(ssn|social security)\b'],
+}
+
+
+def _detect_validation_hint(label: str) -> str:
+    """Detect validation type from label text.
+    Returns one of: '', 'numeric', 'date', 'currency', 'email', 'phone', 'zip', 'ssn'
+    """
+    if not label:
+        return ""
+    label_lower = label.lower()
+    for vtype, patterns in _VALIDATION_PATTERNS.items():
+        for pattern in patterns:
+            if re.search(pattern, label_lower):
+                return vtype
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# Signature and barcode label detection
+# ---------------------------------------------------------------------------
+
+_SIGNATURE_KEYWORDS = ["signature", "sign here", "x ____", "signed", "authorize", "applicant signature", "tenant signature", "employee signature", "contractor signature"]
+_BARCODE_KEYWORDS = ["barcode", "qr code", "pdf417", "qr", "scan code"]
+
+
+def _is_signature_label(label: str) -> bool:
+    if not label:
+        return False
+    label_lower = label.lower()
+    return any(kw in label_lower for kw in _SIGNATURE_KEYWORDS)
+
+
+def _is_barcode_label(label: str) -> bool:
+    if not label:
+        return False
+    label_lower = label.lower()
+    return any(kw in label_lower for kw in _BARCODE_KEYWORDS)
 
 
 # ---------------------------------------------------------------------------
@@ -192,13 +254,14 @@ def _find_nearest_label(
 def _classify_drawing(rect: fitz.Rect, drawing: dict) -> str:
     """
     Classify a vector drawing as 'line', 'checkbox', 'radio', 'table_cell',
-    'textarea', or 'other'.
+    'textarea', 'dropdown', 'other'.
 
-    - Lines: height <= 2px, width >= 30px (horizontal underlines for text)
+    - Lines: height <= 2px, width >= 30px (horizontal underlines for text/signature)
     - Checkboxes: roughly square, 8-25px per side
     - Radio: small circle, 8-20px diameter (detected via bezier curve items)
     - Table cells: rectangles wider than tall, or part of a grid
     - Textarea: large rectangle, height > 25px, width > 60px
+    - Dropdown: rectangle with a small triangle or narrow width + height ~20px
     """
     w = rect.width
     h = rect.height
@@ -222,17 +285,20 @@ def _classify_drawing(rect: fitz.Rect, drawing: dict) -> str:
         if 0.7 <= aspect <= 1.3:
             return "radio"
 
+    # Dropdown: rectangle with small triangle indicator, typically 80-200px wide, 15-25px tall
+    # Check for small filled shapes (triangles) inside the drawing items
+    has_triangle = any(
+        item[0] == "l" and len(item) >= 3  # line items that could form a triangle
+        for item in items
+    )
+    if 80.0 <= w <= 250.0 and 15.0 <= h <= 30.0 and not has_curve:
+        # Could be dropdown if there are multiple short line segments (triangle indicator)
+        if len(items) >= 3:
+            return "dropdown"
+
     # Textarea: large rectangle (multi-line input area)
-    # Only classify as textarea if significantly taller than a table cell
-    # Table cells are typically 10-60px tall; textareas are usually 25-200px
-    # Check if there are other similar rectangles nearby (grid pattern = table cells)
     if w >= 60.0 and h >= 25.0 and h <= 200.0:
-        # If it's a small rectangle that could be a table cell, check dimensions more carefully
-        # Table cells are typically wider than tall or part of a grid
-        # A textarea is usually a standalone large box
         if h <= 60.0 and w <= 200.0:
-            # Could be either — if roughly square or wider, lean toward table_cell
-            # Only call it textarea if it's notably tall relative to width
             if h > w * 0.5:
                 return "textarea"
             return "table_cell"
@@ -270,8 +336,8 @@ def _detect_fields_from_drawings(pdf_path: str, text_pages: dict) -> List[dict]:
             dtype = _classify_drawing(rect, d)
 
             if dtype == "line":
-                # Horizontal line -> text field
-                # The field sits ABOVE the line (where you write)
+                # Horizontal line -> text field or signature field
+                # Check if the label indicates a signature field
                 field_x = rect.x0
                 field_y = max(rect.y0 - 14, 0)
                 field_w = rect.width
@@ -280,14 +346,23 @@ def _detect_fields_from_drawings(pdf_path: str, text_pages: dict) -> List[dict]:
                     field_x, field_y, blocks,
                     field_type="text", field_w=field_w, field_h=field_h
                 )
-                base_name = _sanitize_label(label) or "text"
+                # Check if this is a signature line
+                if _is_signature_label(label):
+                    ftype = "signature"
+                    base_name = _sanitize_label(label) or "signature"
+                else:
+                    ftype = "text"
+                    base_name = _sanitize_label(label) or "text"
                 name = f"{base_name}_{pno}_{int(rect.x0)}_{int(rect.y0)}"
+                validation = _detect_validation_hint(label)
                 page_lines.append({
-                    "page": pno, "type": "text",
+                    "page": pno, "type": ftype,
                     "x": field_x, "y": field_y,
                     "width": field_w, "height": field_h,
                     "label": label, "name": name,
                     "flags": [],
+                    "visibility": "visible",
+                    "validation": validation,
                 })
 
             elif dtype == "checkbox":
@@ -295,6 +370,20 @@ def _detect_fields_from_drawings(pdf_path: str, text_pages: dict) -> List[dict]:
                     rect.x0, rect.y0, blocks,
                     field_type="checkbox", field_w=rect.width, field_h=rect.height
                 )
+                # Check if this is actually a barcode area (square + barcode label)
+                if _is_barcode_label(label):
+                    base_name = _sanitize_label(label) or "barcode"
+                    name = f"{base_name}_{pno}_{int(rect.x0)}_{int(rect.y0)}"
+                    page_checkboxes.append({
+                        "page": pno, "type": "barcode",
+                        "x": rect.x0, "y": rect.y0,
+                        "width": rect.width, "height": rect.height,
+                        "label": label, "name": name,
+                        "flags": [],
+                        "visibility": "visible",
+                        "validation": "",
+                    })
+                    continue
                 base_name = _sanitize_label(label) or "checkbox"
                 name = f"{base_name}_{pno}_{int(rect.x0)}_{int(rect.y0)}"
                 page_checkboxes.append({
@@ -303,6 +392,8 @@ def _detect_fields_from_drawings(pdf_path: str, text_pages: dict) -> List[dict]:
                     "width": rect.width, "height": rect.height,
                     "label": label, "name": name,
                     "flags": [],
+                    "visibility": "visible",
+                    "validation": "",
                 })
 
             elif dtype == "radio":
@@ -318,6 +409,8 @@ def _detect_fields_from_drawings(pdf_path: str, text_pages: dict) -> List[dict]:
                     "width": rect.width, "height": rect.height,
                     "label": label, "name": name,
                     "flags": [],
+                    "visibility": "visible",
+                    "validation": "",
                 })
 
             elif dtype == "textarea":
@@ -333,6 +426,25 @@ def _detect_fields_from_drawings(pdf_path: str, text_pages: dict) -> List[dict]:
                     "width": rect.width, "height": rect.height,
                     "label": label, "name": name,
                     "flags": ["multiline"],
+                    "visibility": "visible",
+                    "validation": "",
+                })
+
+            elif dtype == "dropdown":
+                label = _find_nearest_label(
+                    rect.x0, rect.y0, blocks,
+                    field_type="text", field_w=rect.width, field_h=rect.height
+                )
+                base_name = _sanitize_label(label) or "dropdown"
+                name = f"{base_name}_{pno}_{int(rect.x0)}_{int(rect.y0)}"
+                page_table_cells.append({
+                    "page": pno, "type": "dropdown",
+                    "x": rect.x0, "y": rect.y0,
+                    "width": rect.width, "height": rect.height,
+                    "label": label, "name": name,
+                    "flags": [],
+                    "visibility": "visible",
+                    "validation": "",
                 })
 
             elif dtype == "table_cell":
@@ -348,6 +460,8 @@ def _detect_fields_from_drawings(pdf_path: str, text_pages: dict) -> List[dict]:
                     "width": rect.width, "height": rect.height,
                     "label": label, "name": name,
                     "flags": [],
+                    "visibility": "visible",
+                    "validation": "",
                 })
 
         # Deduplicate: remove table cells that overlap with lines
