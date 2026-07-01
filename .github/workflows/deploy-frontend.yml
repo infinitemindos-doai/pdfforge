@@ -36,7 +36,7 @@ jobs:
       - name: Build
         working-directory: web
         env:
-          VITE_API_URL: https://machinery-alot-shadow-currently.trycloudflare.com
+          VITE_API_URL: https://talks-scanned-whale-graphic.trycloudflare.com
         run: npm run build
 
       - name: Upload artifact
