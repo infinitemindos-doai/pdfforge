@@ -1,7 +1,62 @@
 # PDF Form Domain Guide
 
-> **Source:** Anthony's contact (PDF form domain expert), 2026-07-01
-> **Purpose:** Comprehensive reference for PDFForge field detection, generation, and QA
+
+---
+
+## 0. Field Types in Detail (Adobe Acrobat Reference)
+
+### Text Fields
+- Single-line by default; multi-line must be explicitly enabled
+- Settings: left/right/center alignment, default value, character limit, password masking (asterisks)
+- **Comb mode**: spreads entered characters evenly across field width, separated by lines if border color set
+  - Used for SSN (9 cells), ZIP (5 cells), phone numbers
+  - Width divided by character count (e.g., 9 digits over 180pt = 20pt per cell)
+- **Size guidance**: Single-line ~9-11pt tall, width sized to content (150-200pt for name, 60pt for ZIP)
+
+### Checkbox Fields
+- Not a true "checked" state internally — handled as **export value** match
+- Default export value: "Yes" (case-sensitive match)
+- Can be pre-selected by default
+- **Check Box Style**: check, cross, diamond, circle, star, square
+- **Size guidance**: 9-12pt square for print; 12-18pt square for on-screen/touch accessibility
+- Label text should be at least 11 points (WebAIM)
+
+### Radio Buttons
+- Mutually exclusive within a group (same field Name = same group, different export values = different options)
+- Accessibility: Tooltip must match across all buttons in a group for screen readers
+- **Size guidance**: 9-14pt diameter (same as checkboxes)
+
+### Date Fields
+- Really a text field with a **format** applied (Date category in Format tab)
+- Accepts input but Acrobat validates/displays per pattern (MM/DD/YYYY, etc.)
+- **Size guidance**: ~60-80pt wide at 10-11pt font
+
+### Digital Signature Fields
+- Beyond "sign here": control what happens **after** signing:
+  - Lock all fields
+  - Lock all except specified ones
+  - Lock only specific fields
+  - Trigger custom JavaScript on signature application
+- **Size guidance**: 150-250pt wide x 30-40pt tall
+
+### Drop-Down Lists / List Boxes / Combo Boxes
+- Dropdowns: single selection
+- List boxes: can allow **multiple selection**
+- Combo boxes: can let user enter **custom text** not on the list
+- Options: Add/Delete, reorder with Up/Down, auto-sort
+- Each item has **display text** and **export value** (can differ)
+- **Size guidance**: Height ~11-14pt (single row); width per longest option
+
+### Buttons
+- Can trigger actions: open file, play sound, submit form data to web server
+- Also: reset form, execute JavaScript, go to a page
+- **Size guidance**: ~60-100pt wide x 18-24pt tall
+
+### Barcode Fields
+- Encodes selected field data into a scannable pattern
+- X Dimension (cell width in mils), Y/X ratio (height-to-width), error correction level
+- Higher correction = more reliable reads but larger, more data-limited
+- **Size guidance**: Depends on data volume and scanner distance (0.5-1in for near-field QR)
 
 ---
 

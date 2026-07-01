@@ -144,6 +144,26 @@ def _is_barcode_label(label: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Comb field detection (SSN, ZIP, phone — individual character cells)
+# ---------------------------------------------------------------------------
+
+_COMB_VALIDATION_TYPES = {"ssn", "zip", "phone"}
+
+def _detect_comb_flags(label: str, field_width: float) -> list:
+    """Detect if a text field should use comb mode (individual character cells).
+    Comb fields are used for SSN (9 chars), ZIP (5 chars), phone (10 chars).
+    If the label suggests one of these and the field width is reasonable for
+    comb mode (20-200pt), add the 'comb' flag.
+    """
+    if not label:
+        return []
+    validation = _detect_validation_hint(label)
+    if validation in _COMB_VALIDATION_TYPES and 20.0 <= field_width <= 200.0:
+        return ["comb"]
+    return []
+
+
+# ---------------------------------------------------------------------------
 # Text extraction (PyMuPDF) for labelling
 # ---------------------------------------------------------------------------
 
@@ -254,47 +274,61 @@ def _find_nearest_label(
 def _classify_drawing(rect: fitz.Rect, drawing: dict) -> str:
     """
     Classify a vector drawing as 'line', 'checkbox', 'radio', 'table_cell',
-    'textarea', 'dropdown', 'other'.
+    'textarea', 'dropdown', 'button', 'other'.
 
-    - Lines: height <= 2px, width >= 30px (horizontal underlines for text/signature)
-    - Checkboxes: roughly square, 8-25px per side
-    - Radio: small circle, 8-20px diameter (detected via bezier curve items)
+    Size guidance from Adobe Acrobat field properties:
+      - Text single-line: ~9-11pt tall, width sized to content
+      - Checkbox: 9-18pt square (9-12 for print, 12-18 for touch)
+      - Radio: 9-14pt diameter
+      - Signature: 150-250pt wide x 30-40pt tall
+      - Dropdown/list: ~11-14pt tall, width per longest option
+      - Button: ~60-100pt wide x 18-24pt tall
+      - Comb (SSN/ZIP): divide total width by character count
+
+    - Lines: height <= 2px, width >= 20px (horizontal underlines for text/signature)
+    - Checkboxes: roughly square, 6-25px per side
+    - Radio: small circle, 5-22px diameter (detected via bezier curve items)
     - Table cells: rectangles wider than tall, or part of a grid
     - Textarea: large rectangle, height > 25px, width > 60px
-    - Dropdown: rectangle with a small triangle or narrow width + height ~20px
+    - Dropdown: rectangle with small triangle, 80-250px wide, 15-30px tall
+    - Button: filled rectangle 60-120px wide, 18-30px tall (distinct from table cells)
     """
     w = rect.width
     h = rect.height
 
     # Horizontal line: very thin height, decent width
-    if h <= 2.0 and w >= 30.0:
+    # Lowered minimum from 30 to 20 to catch short fields (ZIP, SSN cells)
+    if h <= 2.0 and w >= 20.0:
         return "line"
 
     # Checkbox: roughly square, 8-25pt per side
-    if 8.0 <= w <= 25.0 and 8.0 <= h <= 25.0:
+    # Widened range from 8-25 to 6-25 and aspect from 0.7-1.3 to 0.6-1.4
+    # to catch small checkboxes that contact reported as being missed
+    if 6.0 <= w <= 25.0 and 6.0 <= h <= 25.0:
         aspect = w / h if h > 0 else 0
-        if 0.7 <= aspect <= 1.3:
+        if 0.6 <= aspect <= 1.4:
             return "checkbox"
 
     # Radio button: small circle, 8-20px diameter
     # PyMuPDF draws circles as beziers — detect by checking items for curve ops
     items = drawing.get("items", [])
     has_curve = any(item[0] in ("c", "curve", "qu") for item in items)
-    if has_curve and 6.0 <= w <= 22.0 and 6.0 <= h <= 22.0:
+    if has_curve and 5.0 <= w <= 22.0 and 5.0 <= h <= 22.0:
         aspect = w / h if h > 0 else 0
         if 0.7 <= aspect <= 1.3:
             return "radio"
 
-    # Dropdown: rectangle with small triangle indicator, typically 80-200px wide, 15-25px tall
-    # Check for small filled shapes (triangles) inside the drawing items
-    has_triangle = any(
-        item[0] == "l" and len(item) >= 3  # line items that could form a triangle
-        for item in items
-    )
     if 80.0 <= w <= 250.0 and 15.0 <= h <= 30.0 and not has_curve:
         # Could be dropdown if there are multiple short line segments (triangle indicator)
         if len(items) >= 3:
             return "dropdown"
+
+    # Button: filled rectangle 60-120px wide, 18-30px tall (distinct from table cells)
+    # Buttons typically have a fill color and are standalone (not in grids)
+    if 60.0 <= w <= 120.0 and 18.0 <= h <= 30.0:
+        fill = drawing.get("fill", None)
+        if fill is not None:
+            return "button"
 
     # Textarea: large rectangle (multi-line input area)
     if w >= 60.0 and h >= 25.0 and h <= 200.0:
@@ -316,6 +350,11 @@ def _detect_fields_from_drawings(pdf_path: str, text_pages: dict) -> List[dict]:
     Extract form fields directly from PyMuPDF's vector drawing data.
     This is far more accurate than rasterising + OpenCV because we get
     exact coordinates from the PDF content stream.
+
+    v4.1 fix: Containment-aware classification. Before classifying a drawing,
+    check if it contains smaller drawings inside it. If a large rectangle
+    contains small squares (checkboxes), the large rectangle is a container/border,
+    not a field. This fixes the 'huge text field instead of checkboxes' bug.
     """
     doc = fitz.open(pdf_path)
     all_fields = []
@@ -325,13 +364,47 @@ def _detect_fields_from_drawings(pdf_path: str, text_pages: dict) -> List[dict]:
         blocks = text_pages.get(pno, [])
         drawings = page.get_drawings()
 
+        # --- Containment analysis ---
+        # For each drawing, check if it contains smaller drawings inside it.
+        # If so, and the inner drawings are checkbox-sized, skip the outer
+        # drawing (it's a container/border, not a field).
+        skip_indices = set()
+        for i, outer in enumerate(drawings):
+            outer_rect = outer["rect"]
+            # Only check containment for larger drawings (potential containers)
+            if outer_rect.width < 50 or outer_rect.height < 25:
+                continue
+            inner_are_checkboxes = 0
+            for j, inner in enumerate(drawings):
+                if i == j:
+                    continue
+                inner_rect = inner["rect"]
+                # Check if inner is fully contained within outer
+                if (inner_rect.x0 >= outer_rect.x0 and
+                    inner_rect.y0 >= outer_rect.y0 and
+                    inner_rect.x1 <= outer_rect.x1 and
+                    inner_rect.y1 <= outer_rect.y1):
+                    # Check if inner looks like a checkbox (6-25pt square)
+                    iw, ih = inner_rect.width, inner_rect.height
+                    if 6.0 <= iw <= 25.0 and 6.0 <= ih <= 25.0:
+                        aspect = iw / ih if ih > 0 else 0
+                        if 0.6 <= aspect <= 1.4:
+                            inner_are_checkboxes += 1
+            # If the outer drawing contains 2+ checkbox-sized inner drawings,
+            # it's a container/border — skip it
+            if inner_are_checkboxes >= 2:
+                skip_indices.add(i)
+
         page_lines = []
         page_checkboxes = []
         page_radios = []
         page_table_cells = []
         page_textareas = []
+        page_buttons = []
 
-        for d in drawings:
+        for idx, d in enumerate(drawings):
+            if idx in skip_indices:
+                continue
             rect = d["rect"]
             dtype = _classify_drawing(rect, d)
 
@@ -360,7 +433,7 @@ def _detect_fields_from_drawings(pdf_path: str, text_pages: dict) -> List[dict]:
                     "x": field_x, "y": field_y,
                     "width": field_w, "height": field_h,
                     "label": label, "name": name,
-                    "flags": [],
+                    "flags": _detect_comb_flags(label, field_w),
                     "visibility": "visible",
                     "validation": validation,
                 })
@@ -459,12 +532,29 @@ def _detect_fields_from_drawings(pdf_path: str, text_pages: dict) -> List[dict]:
                     "x": rect.x0, "y": rect.y0,
                     "width": rect.width, "height": rect.height,
                     "label": label, "name": name,
+                   "flags": [],
+                   "visibility": "visible",
+                   "validation": "",
+               })
+
+            elif dtype == "button":
+                label = _find_nearest_label(
+                    rect.x0, rect.y0, blocks,
+                    field_type="text", field_w=rect.width, field_h=rect.height
+                )
+                base_name = _sanitize_label(label) or "button"
+                name = f"{base_name}_{pno}_{int(rect.x0)}_{int(rect.y0)}"
+                page_buttons.append({
+                    "page": pno, "type": "button",
+                    "x": rect.x0, "y": rect.y0,
+                    "width": rect.width, "height": rect.height,
+                    "label": label, "name": name,
                     "flags": [],
                     "visibility": "visible",
                     "validation": "",
                 })
 
-        # Deduplicate: remove table cells that overlap with lines
+       # Deduplicate: remove table cells that overlap with lines
         filtered_cells = []
         for cell in page_table_cells:
             overlaps_line = False
@@ -500,7 +590,7 @@ def _detect_fields_from_drawings(pdf_path: str, text_pages: dict) -> List[dict]:
         # Sort by reading order (top-to-bottom, left-to-right) for tab order
         page_fields = (
             filtered_cells + filtered_lines + page_checkboxes
-            + page_radios + filtered_textareas
+            + page_radios + filtered_textareas + page_buttons
         )
         page_fields.sort(key=lambda f: (f["y"], f["x"]))
 

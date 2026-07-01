@@ -84,6 +84,41 @@ _VALIDATION_FORMATS = {
     "ssn": {"font_size": 10, "format": fitz.PDF_WIDGET_TX_FORMAT_SPECIAL},
 }
 
+# ---------------------------------------------------------------------------
+# Size clamping — enforce Adobe Acrobat field size guidance
+# Prevents "huge text field instead of checkboxes" bug
+# ---------------------------------------------------------------------------
+
+# Size bounds per field type (in points)
+_SIZE_BOUNDS = {
+    "text":          {"min_h": 9, "max_h": 14, "min_w": 20, "max_w": 400},
+    "checkbox":      {"min_h": 8, "max_h": 18, "min_w": 8, "max_w": 18},
+    "radio":         {"min_h": 8, "max_h": 18, "min_w": 8, "max_w": 18},
+    "table_cell":    {"min_h": 10, "max_h": 60, "min_w": 30, "max_w": 300},
+    "textarea":      {"min_h": 25, "max_h": 200, "min_w": 60, "max_w": 400},
+    "signature":     {"min_h": 20, "max_h": 40, "min_w": 100, "max_w": 300},
+    "dropdown":      {"min_h": 11, "max_h": 25, "min_w": 60, "max_w": 250},
+    "barcode":       {"min_h": 20, "max_h": 200, "min_w": 20, "max_w": 200},
+    "button":        {"min_h": 18, "max_h": 30, "min_w": 60, "max_w": 120},
+}
+
+
+def _clamp_field_size(field: dict) -> dict:
+    """Clamp field width and height to Adobe-recommended bounds.
+    This prevents oversized fields (the 'huge text field' bug).
+    """
+    ftype = field.get("type", "text")
+    bounds = _SIZE_BOUNDS.get(ftype, _SIZE_BOUNDS["text"])
+    field = dict(field)  # don't mutate original
+    field["width"] = max(bounds["min_w"], min(field["width"], bounds["max_w"]))
+    field["height"] = max(bounds["min_h"], min(field["height"], bounds["max_h"]))
+    # Special: checkbox/radio should be forced to square
+    if ftype in ("checkbox", "radio"):
+        size = min(field["width"], field["height"])
+        field["width"] = max(bounds["min_w"], min(size, bounds["max_w"]))
+        field["height"] = field["width"]
+    return field
+
 
 # ---------------------------------------------------------------------------
 # Validation
@@ -139,6 +174,7 @@ def _add_text_field(page, field: dict, name: str) -> str:
 
     tooltip = field.get("label") or name
     flags = field.get("flags") or []
+    validation = field.get("validation", "")
 
     widget = fitz.Widget()
     widget.field_name = name
@@ -152,8 +188,34 @@ def _add_text_field(page, field: dict, name: str) -> str:
     widget.fill_color = None
 
     # Set field flags
+    field_flags = 0
     if "multiline" in flags:
-        widget.field_flags = fitz.PDF_WIDGET_F_MULTILINE
+        field_flags |= fitz.PDF_TX_FIELD_IS_MULTILINE
+    if "password" in flags:
+        field_flags |= fitz.PDF_TX_FIELD_IS_PASSWORD
+    if "comb" in flags:
+        # Comb mode: spread characters evenly across field width
+        # Requires a character limit (max_len) to be set
+        field_flags |= fitz.PDF_TX_FIELD_IS_COMB
+    if "readonly" in flags:
+        field_flags |= _FIELD_READONLY
+    if "required" in flags:
+        field_flags |= _FIELD_REQUIRED
+    if field_flags:
+        widget.field_flags = field_flags
+
+    # Apply validation format if detected
+    if validation and validation in _VALIDATION_FORMATS:
+        fmt = _VALIDATION_FORMATS[validation]
+        if hasattr(widget, "text_format"):
+            widget.text_format = fmt["format"]
+
+    # Set character limit for comb fields (SSN=9, ZIP=5, phone=10)
+    if "comb" in flags:
+        comb_lengths = {"ssn": 9, "zip": 5, "phone": 10}
+        max_len = comb_lengths.get(validation, 0)
+        if max_len and hasattr(widget, "text_maxlen"):
+            widget.text_maxlen = max_len
 
     page.add_widget(widget)
     return name
@@ -169,6 +231,7 @@ def _add_checkbox_field(page, field: dict, name: str) -> str:
     rect = fitz.Rect(cx - size / 2, cy - size / 2, cx + size / 2, cy + size / 2)
 
     tooltip = field.get("label") or name
+    flags = field.get("flags") or []
 
     widget = fitz.Widget()
     widget.field_name = name
@@ -177,6 +240,18 @@ def _add_checkbox_field(page, field: dict, name: str) -> str:
     widget.rect = rect
     widget.border_color = None
     widget.fill_color = None
+
+    # Checkbox style: check (default), cross, diamond, circle, star, square
+    # PyMuPDF doesn't expose checkbox style directly, but we can set it via
+    # the annotation's appearance state
+    if "required" in flags:
+        widget.field_flags = _FIELD_REQUIRED
+    if "readonly" in flags:
+        widget.field_flags |= _FIELD_READONLY
+
+    # Pre-selected (checked by default)
+    if "checked" in flags:
+        widget.field_value = "Yes"
 
     page.add_widget(widget)
     return name
@@ -306,6 +381,34 @@ def _add_barcode_field(page, field: dict, name: str) -> str:
     return _add_text_field(page, field_copy, name)
 
 
+def _add_button_field(page, field: dict, name: str) -> str:
+    """Add a button widget to the page.
+    Buttons can trigger actions: submit form, reset form, open URL, etc.
+    Uses PyMuPDF's button widget type.
+    """
+    rect = _make_rect(field)
+    tooltip = field.get("label") or name
+
+    widget = fitz.Widget()
+    widget.field_name = name
+    widget.field_label = tooltip
+    widget.field_type = fitz.PDF_WIDGET_TYPE_BUTTON
+    widget.rect = rect
+    widget.text_font = "Helv"
+    widget.text_fontsize = 10
+    widget.text_color = (1, 1, 1)  # white text
+    widget.fill_color = (0.2, 0.5, 0.8)  # blue button
+    widget.border_color = (0.1, 0.3, 0.6)
+
+    # Set visibility flags
+    vis = field.get("visibility", "visible")
+    if vis in _VISIBILITY_FLAGS and _VISIBILITY_FLAGS[vis]:
+        widget.field_flags = _VISIBILITY_FLAGS[vis]
+
+    page.add_widget(widget)
+    return name
+
+
 # ---------------------------------------------------------------------------
 # Main generation function
 # ---------------------------------------------------------------------------
@@ -346,9 +449,10 @@ def generate_fillable_pdf(
                 if verbose:
                     print(f"  WARNING: skipping invalid field at index {i}: {e}")
                 logger.warning(f"Skipping invalid field at index {i}: {e}")
-                continue
 
             pno = field["page"]
+            # Clamp field size to Adobe-recommended bounds
+            field = _clamp_field_size(field)
             # Check page bounds (including negative index — no Python negative wrap)
             if pno < 0 or pno >= len(doc):
                 if verbose:
@@ -381,6 +485,8 @@ def generate_fillable_pdf(
                 name = _add_dropdown_field(page, field, name)
             elif ftype == "barcode":
                 name = _add_barcode_field(page, field, name)
+            elif ftype == "button":
+                name = _add_button_field(page, field, name)
             else:
                 if verbose:
                     print(f"  WARNING: unknown field type '{ftype}', skipping")
