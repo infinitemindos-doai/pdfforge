@@ -192,6 +192,156 @@ def comment_pr_tool(pr_number: str, comment: str) -> str:
         return f"Error: {e}"
 
 
+# ── CV / Data Pipeline Tools ──
+
+@tool("Extract ground-truth fields from a PDF with AcroForm fields")
+def extract_gt_tool(pdf_path: str) -> str:
+    """Extract existing AcroForm field annotations from a PDF.
+    Used to generate training labels for the CV model.
+    Args:
+        pdf_path: Absolute path to a PDF with fillable form fields
+    """
+    try:
+        sys.path.insert(0, PDFFORGE_ROOT)
+        from cv_pipeline.preprocess import extract_ground_truth
+        fields = extract_ground_truth(pdf_path)
+        return f"Found {len(fields)} ground-truth fields:\n" + json.dumps(fields, indent=2)[:5000]
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@tool("Rasterize a PDF page to an image for CV analysis")
+def rasterize_page_tool(pdf_path: str, page_num: int, dpi: int = 200) -> str:
+    """Convert a PDF page to a PNG image for computer vision processing.
+    Args:
+        pdf_path: Absolute path to the PDF
+        page_num: Page number (0-indexed)
+        dpi: Resolution for rasterization (default 200)
+    """
+    try:
+        sys.path.insert(0, PDFFORGE_ROOT)
+        from cv_pipeline.preprocess import rasterize_page
+        import cv2
+        img = rasterize_page(pdf_path, page_num, dpi=dpi)
+        out_path = f"/tmp/pdfforge_page_{page_num}.png"
+        cv2.imwrite(out_path, img)
+        return f"Rasterized page {page_num} to {out_path} ({img.shape[1]}x{img.shape[0]} pixels at {dpi} DPI)"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@tool("Run CV field detection on a PDF using OpenCV heuristics")
+def cv_detect_tool(pdf_path: str) -> str:
+    """Detect form fields in a PDF using computer vision (OpenCV).
+    This is the fallback detector for scanned PDFs where vector extraction finds nothing.
+    Args:
+        pdf_path: Absolute path to the PDF
+    """
+    try:
+        sys.path.insert(0, PDFFORGE_ROOT)
+        from cv_detector import detect_fields_cv
+        fields = detect_fields_cv(pdf_path, verbose=True)
+        return f"CV detection found {len(fields)} fields\n" + json.dumps(fields, indent=2)[:5000]
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@tool("Run hybrid field detection (vector first, CV fallback)")
+def hybrid_detect_tool(pdf_path: str) -> str:
+    """Detect form fields using the smart pipeline: vector extraction first,
+    then CV heuristic fallback if no fields found.
+    Args:
+        pdf_path: Absolute path to the PDF
+    """
+    try:
+        sys.path.insert(0, PDFFORGE_ROOT)
+        from cv_detector import detect_fields_hybrid
+        fields = detect_fields_hybrid(pdf_path, verbose=True)
+        return f"Hybrid detection found {len(fields)} fields\n" + json.dumps(fields, indent=2)[:5000]
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@tool("Preprocess a directory of PDFs into a YOLOv8 training dataset")
+def preprocess_dataset_tool(input_dir: str, output_dir: str, augment: bool = False) -> str:
+    """Convert a directory of PDFs (with AcroForm fields) into a YOLOv8 dataset.
+    Args:
+        input_dir: Directory containing PDF files with fillable fields
+        output_dir: Where to write the YOLO dataset
+        augment: Enable data augmentation (default False)
+    """
+    try:
+        sys.path.insert(0, PDFFORGE_ROOT)
+        from cv_pipeline.preprocess import process_dataset
+        stats = process_dataset(input_dir, output_dir, augment=augment)
+        return f"Dataset created: {json.dumps(stats, indent=2)}"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@tool("Create a test PDF with known form fields for QA testing")
+def create_test_pdf_tool(output_path: str, field_types: str = "text,checkbox,table") -> str:
+    """Generate a test PDF with specific field types for QA validation.
+    Args:
+        output_path: Where to save the test PDF
+        field_types: Comma-separated list of field types to include
+    """
+    try:
+        import fitz
+        doc = fitz.open()
+        page = doc.new_page()
+
+        types = field_types.split(",")
+        y_offset = 72
+
+        if "text" in types:
+            page.insert_text((72, y_offset), "Name:", fontsize=12)
+            page.draw_line(fitz.Point(120, y_offset + 2), fitz.Point(300, y_offset + 2))
+            y_offset += 30
+            page.insert_text((72, y_offset), "Email:", fontsize=12)
+            page.draw_line(fitz.Point(120, y_offset + 2), fitz.Point(300, y_offset + 2))
+            y_offset += 40
+
+        if "checkbox" in types:
+            page.insert_text((72, y_offset), "Check if applicable:", fontsize=12)
+            page.draw_rect(fitz.Rect(180, y_offset - 10, 195, y_offset + 5))
+            page.insert_text((200, y_offset), "Option A", fontsize=10)
+            y_offset += 20
+            page.draw_rect(fitz.Rect(180, y_offset - 10, 195, y_offset + 5))
+            page.insert_text((200, y_offset), "Option B", fontsize=10)
+            y_offset += 40
+
+        if "table" in types:
+            page.insert_text((72, y_offset), "Quantity  |  Description  |  Price", fontsize=10)
+            y_offset += 15
+            for i in range(3):
+                page.draw_rect(fitz.Rect(72, y_offset, 150, y_offset + 20))
+                page.draw_rect(fitz.Rect(150, y_offset, 350, y_offset + 20))
+                page.draw_rect(fitz.Rect(350, y_offset, 450, y_offset + 20))
+                y_offset += 20
+
+        doc.save(output_path)
+        doc.close()
+        return f"Test PDF created at {output_path} with field types: {field_types}"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@tool("Verify a generated fillable PDF has working AcroForm fields")
+def verify_pdf_tool(pdf_path: str) -> str:
+    """Verify that a PDF contains real AcroForm widgets.
+    Args:
+        pdf_path: Absolute path to the fillable PDF to verify
+    """
+    try:
+        sys.path.insert(0, PDFFORGE_ROOT)
+        from generator import verify_acroform_fields
+        info = verify_acroform_fields(pdf_path)
+        return f"Verification result:\n{json.dumps(info, indent=2)}"
+    except Exception as e:
+        return f"Error: {e}"
+
+
 # ── API Testing Tools ──
 
 @tool("Test the pdfforge API health endpoint")

@@ -44,6 +44,11 @@ PARENT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PARENT_DIR))
 
 from detector import detect_fields, detect_fields_json
+try:
+    from cv_detector import detect_fields_hybrid
+    CV_FALLBACK_AVAILABLE = True
+except Exception:
+    CV_FALLBACK_AVAILABLE = False
 from generator import generate_fillable_pdf, verify_acroform_fields
 
 # ── Environment ─────────────────────────────────────────────────────────
@@ -312,9 +317,12 @@ async def analyze_pdf(file: UploadFile = File(...)):
         with open(pdf_path, "wb") as f:
             f.write(content)
 
-        # Run detection
+        # Run detection (hybrid: vector first, CV fallback for scanned PDFs)
         try:
-            fields = detect_fields(pdf_path, verbose=False)
+            if CV_FALLBACK_AVAILABLE:
+                fields = detect_fields_hybrid(pdf_path, verbose=False)
+            else:
+                fields = detect_fields(pdf_path, verbose=False)
         except Exception as e:
             logger.exception("Field detection failed for uploaded PDF")
             raise HTTPException(
@@ -400,7 +408,10 @@ async def generate_pdf(
             _validate_fields(fields)
         else:
             try:
-                fields = detect_fields(pdf_path, verbose=False)
+                if CV_FALLBACK_AVAILABLE:
+                    fields = detect_fields_hybrid(pdf_path, verbose=False)
+                else:
+                    fields = detect_fields(pdf_path, verbose=False)
             except Exception as e:
                 logger.exception("Field detection failed for uploaded PDF in generate-pdf")
                 raise HTTPException(
